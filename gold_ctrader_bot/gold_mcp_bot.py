@@ -225,6 +225,7 @@ class GoldMCPBot:
             "trading_days": list(self.trading_days),
             "target_hit": self.target_hit,
             "current_price": self.close_prices[-1] if self.close_prices else 0,
+            "current_sl": self.current_sl,
             "ema": self.ema,
             "atr": self.atr,
             "adx": self.adx,
