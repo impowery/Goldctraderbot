@@ -35,6 +35,7 @@ TIME_EXIT_HOURS = float(os.getenv("TIME_EXIT_HOURS", "2"))
 
 TRADE_LOG_PATH = os.getenv("TRADE_LOG_PATH", "trades_gold_ctrader.jsonl")
 STATE_FILE_PATH = os.getenv("STATE_FILE_PATH", "state.json")
+TARGET_PROFIT = float(os.getenv("TARGET_PROFIT", "0"))
 
 import numpy as np
 
@@ -79,6 +80,11 @@ class GoldMCPBot:
         self.adx = 0.0
         self.ema = 0.0
         self.last_candle_fetch = 0
+
+        # Challenge tracking
+        self.total_pnl = 0.0
+        self.trading_days = set()
+        self.target_hit = False
 
     # ─── MCP helpers ────────────────────────────────────────────────
 
@@ -132,7 +138,9 @@ class GoldMCPBot:
                  "entry_ema": self.entry_ema, "daily_start_balance": self.daily_start_balance,
                  "daily_loss_hit": self.daily_loss_hit, "consecutive_tp": self.consecutive_tp,
                  "tp_cooldown_until": self.tp_cooldown_until, "daily_pnl": self.daily_pnl,
-                 "daily_pnl_day": self.daily_pnl_day, "last_entry_minute": self.last_entry_minute}
+                 "daily_pnl_day": self.daily_pnl_day, "last_entry_minute": self.last_entry_minute,
+                 "total_pnl": self.total_pnl, "trading_days": list(self.trading_days),
+                 "target_hit": self.target_hit}
         tmp = STATE_FILE_PATH + ".tmp"
         try:
             with open(tmp, "w") as f:
@@ -161,6 +169,9 @@ class GoldMCPBot:
             self.daily_pnl = state.get("daily_pnl", 0.0)
             self.daily_pnl_day = state.get("daily_pnl_day", "")
             self.last_entry_minute = state.get("last_entry_minute", -1)
+            self.total_pnl = state.get("total_pnl", 0.0)
+            self.trading_days = set(state.get("trading_days", []))
+            self.target_hit = state.get("target_hit", False)
             if self.entries:
                 print(f"[GoldMCP] State restored: {len(self.entries)} entries, "
                       f"{'SHORT' if self.is_short else 'LONG'} @ {self.avg_price}")
@@ -371,8 +382,18 @@ class GoldMCPBot:
             return
         today = datetime.now().strftime("%Y-%m-%d")
         if self.daily_pnl_day != today:
+            if self.daily_pnl_day:
+                print(f"[GoldMCP] Day {self.daily_pnl_day} PnL: ${self.daily_pnl:.2f}")
             self.daily_pnl_day = today
             self.daily_pnl = daily_pnl
+
+        # Target profit check
+        if TARGET_PROFIT > 0 and self.total_pnl >= TARGET_PROFIT and not self.target_hit:
+            self.target_hit = True
+            print(f"[GoldMCP] TARGET REACHED: ${self.total_pnl:.2f} >= ${TARGET_PROFIT:.2f} — stopped")
+            if self.has_position:
+                await self.close_all("TARGET")
+            return
 
         # 3. Sync position from cTrader
         await self.sync_position()
@@ -395,6 +416,15 @@ class GoldMCPBot:
 
         # Periodic state save (every 60s via this tick)
         self._save_state()
+
+        # Track trading days
+        if self.has_position or self.entries:
+            self.trading_days.add(today)
+
+        # Log challenge progress
+        if TARGET_PROFIT > 0:
+            print(f"[GoldMCP] Progress: ${self.total_pnl:.2f} / ${TARGET_PROFIT:.2f} "
+                  f"| days={len(self.trading_days)} PnL/day={self.daily_pnl:.2f}")
 
         # 5. Manage existing position
         if self.has_position:
@@ -573,6 +603,7 @@ class GoldMCPBot:
         if bal_before and bal_after and entry_price > 0:
             exit_price = self.close_prices[-1] if self.close_prices else 0
             pnl = float(bal_after.get("balance", 0)) - float(bal_before.get("balance", 0))
+            self.total_pnl += pnl
             self._write_trade(reason, entry_price, exit_price, pnl, entries_used)
         self.entries = []
         self.closed_half = False
