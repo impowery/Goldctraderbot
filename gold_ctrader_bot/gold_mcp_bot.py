@@ -608,14 +608,12 @@ class GoldMCPBot:
         vol = self.entry_volume(entry_idx)
         print(f"[GoldMCP] Entry #{entry_idx + 1}: {side.upper()} {vol} lots @ ${price:.2f}")
 
-        if not self.entries:
-            # First entry: set SL/TP
-            sl_pips = int(self.entry_atr * SL_ATR_MULT / self.pip_size) if self.entry_atr > 0 else 200
-            tp_pips = int(self.entry_atr * TP2_ATR_MULT / self.pip_size) if self.entry_atr > 0 else 400
-            order = await self.place_market_order(side, vol, sl_pips, tp_pips)
-        else:
-            # Scale-in: no SL/TP (will be amended later)
-            order = await self.place_market_order(side, vol)
+        # Every entry gets SL/TP — Hedged mode requires per-position SL
+        # SL based on current ATR (not entry_atr) for adaptive risk
+        atr_for_sl = self.atr if self.atr > 0 else (self.entry_atr if self.entry_atr > 0 else 10)
+        sl_pips = int(atr_for_sl * SL_ATR_MULT / self.pip_size) if atr_for_sl > 0 else 200
+        tp_pips = int(atr_for_sl * TP2_ATR_MULT / self.pip_size) if atr_for_sl > 0 else 400
+        order = await self.place_market_order(side, vol, sl_pips, tp_pips)
 
         if order:
             # Try to get position_id from order response
@@ -625,7 +623,7 @@ class GoldMCPBot:
             self.entries.append({"price": price, "volume_lots": vol, "position_id": position_id})
             self.last_entry_minute = datetime.now().minute
             print(f"[GoldMCP] Entry #{entry_idx + 1} done | avg={self.avg_price:.2f} vol={self.total_volume:.2f} "
-                  f"pos_id={position_id}")
+                  f"pos_id={position_id} SL={sl_pips}p TP={tp_pips}p")
             await asyncio.sleep(2)
         else:
             print(f"[GoldMCP] Entry #{entry_idx + 1} failed")
@@ -769,12 +767,22 @@ class GoldMCPBot:
         print(f"[GoldMCP] Closing all — {reason}")
         bal_before = await self.get_balance_raw()
         await self.call("close_all_positions", {"symbolName": SYMBOL})
+        # Wait for cTrader to process close + balance update
+        await asyncio.sleep(2)
         bal_after = await self.get_balance_raw()
-        if bal_before and bal_after and entry_price > 0:
-            exit_price = self.close_prices[-1] if self.close_prices else 0
+        exit_price = self.close_prices[-1] if self.close_prices else 0
+        pnl = 0.0
+        if bal_before and bal_after:
             pnl = float(bal_after.get("balance", 0)) - float(bal_before.get("balance", 0))
+        elif bal_after:
+            # Fallback: use total_pnl delta from balance change since daily_start_balance
+            bal_after_val = float(bal_after.get("balance", 0))
+            pnl = bal_after_val - (self.daily_start_balance or 0) - self.total_pnl
+        # Always write trade (even if pnl=0) so VPS dashboard + alerts work
+        if entry_price > 0:
             self.total_pnl += pnl
             self._write_trade(reason, entry_price, exit_price, pnl, entries_used)
+            print(f"[GoldMCP] Closed {entries_used} entries | PnL: ${pnl:+.2f} | total: ${self.total_pnl:+.2f}")
         self.entries = []
         self.closed_half = False
         self._save_state()
