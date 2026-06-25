@@ -19,11 +19,14 @@ MAX_LOSS_PERCENT=3.0
 # Scale-in (lots per entry)
 ENTRY_VOLUMES=0.02,0.02,0.02
 MAX_ENTRIES=3
-SL_ATR_MULT=4.0
-TP1_ATR_MULT=0.8
-TP2_ATR_MULT=1.5
-TRAIL_ACTIVATE_PCT=0.3
-TIME_EXIT_HOURS=2
+
+# Trend-following settings (better RR for PipFarm challenge)
+# RR = TP2/SL = 4.0/2.0 = 2.0 — risk $24 to make $48 (at ATR=$12)
+SL_ATR_MULT=2.0          # was 4.0 — tighter SL, cut losses faster
+TP1_ATR_MULT=1.5         # was 0.8 — partial close later, give trend room
+TP2_ATR_MULT=4.0         # was 1.5 — let profits run, 4×ATR = $48
+TRAIL_ACTIVATE_PCT=0.5   # was 0.3 — later trailing (avoid noise)
+TIME_EXIT_HOURS=4        # was 2 — more time for trend to develop
 
 # Demo sizing: 0.02 lots/entry, 0.06 max
 # Challenge sizing: 0.06 lots/entry, 0.18 max (1:20 leverage on PipFarm)

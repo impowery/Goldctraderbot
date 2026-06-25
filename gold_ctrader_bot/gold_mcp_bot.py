@@ -438,19 +438,28 @@ class GoldMCPBot:
 
         self._load_state()
 
-        # Restore cTrader position on restart
+        # Restore cTrader positions on restart (handles Hedged mode — multiple positions per symbol)
         pos_data = await self.get_positions_raw()
         if pos_data and isinstance(pos_data, dict):
-            for p in pos_data.get("positions", []):
-                if p.get("symbolName") == SYMBOL:
-                    self.entries = [{"price": float(p.get("entryPrice", 0)),
-                                     "volume_lots": float(p.get("volumeInLots", 0.01))}]
-                    self.is_short = p.get("tradeSide", "Buy").lower() == "sell"
-                    self.entry_time = int(time.time() * 1000)
-                    self.closed_half = False
-                    self.extreme_price = float(p.get("currentPrice", 0))
-                    print(f"[GoldMCP] Restored position: {'SHORT' if self.is_short else 'LONG'} "
-                          f"{self.total_volume} lots @ {self.avg_price}")
+            ctrader_positions = [p for p in pos_data.get("positions", [])
+                                 if p.get("symbolName") == SYMBOL]
+            if ctrader_positions:
+                # Sort by createdDateTime to match entry order
+                ctrader_positions.sort(key=lambda p: p.get("createdDateTime", ""))
+                self.entries = []
+                for p in ctrader_positions:
+                    pid = p.get("positionId") or p.get("id")
+                    self.entries.append({
+                        "price": float(p.get("entryPrice", 0)),
+                        "volume_lots": float(p.get("volumeInLots", 0.01)),
+                        "position_id": pid
+                    })
+                self.is_short = ctrader_positions[0].get("tradeSide", "Buy").lower() == "sell"
+                self.entry_time = int(time.time() * 1000)
+                self.closed_half = False
+                self.extreme_price = float(ctrader_positions[0].get("currentPrice", 0))
+                print(f"[GoldMCP] Restored {len(self.entries)} position(s): "
+                      f"{'SHORT' if self.is_short else 'LONG'} {self.total_volume} lots @ {self.avg_price}")
 
         while True:
             try:
@@ -605,36 +614,92 @@ class GoldMCPBot:
             tp_pips = int(self.entry_atr * TP2_ATR_MULT / self.pip_size) if self.entry_atr > 0 else 400
             order = await self.place_market_order(side, vol, sl_pips, tp_pips)
         else:
+            # Scale-in: no SL/TP (will be amended later)
             order = await self.place_market_order(side, vol)
 
         if order:
-            self.entries.append({"price": price, "volume_lots": vol})
+            # Try to get position_id from order response
+            position_id = None
+            if isinstance(order, dict):
+                position_id = order.get("positionId") or order.get("position_id")
+            self.entries.append({"price": price, "volume_lots": vol, "position_id": position_id})
             self.last_entry_minute = datetime.now().minute
-            print(f"[GoldMCP] Entry #{entry_idx + 1} done | avg={self.avg_price:.2f} vol={self.total_volume:.2f}")
+            print(f"[GoldMCP] Entry #{entry_idx + 1} done | avg={self.avg_price:.2f} vol={self.total_volume:.2f} "
+                  f"pos_id={position_id}")
             await asyncio.sleep(2)
         else:
             print(f"[GoldMCP] Entry #{entry_idx + 1} failed")
+
+        # After entry: sync position_id from cTrader (in case order didn't return it)
+        await self.sync_position_ids()
+
+    async def sync_position_ids(self):
+        """Fetch all positions from cTrader and update self.entries with position_id.
+        Handles Hedged mode (multiple positions per symbol)."""
+        pos_data = await self.get_positions_raw()
+        if not pos_data or not isinstance(pos_data, dict):
+            return
+        ctrader_positions = [p for p in pos_data.get("positions", [])
+                             if p.get("symbolName") == SYMBOL]
+        if not ctrader_positions:
+            return
+        # Match by index (entries[0] → positions[0], entries[1] → positions[1])
+        # Sort by createdDateTime to match entry order
+        ctrader_positions.sort(key=lambda p: p.get("createdDateTime", ""))
+        for i, entry in enumerate(self.entries):
+            if i < len(ctrader_positions):
+                pid = ctrader_positions[i].get("positionId") or ctrader_positions[i].get("id")
+                if pid and entry.get("position_id") != pid:
+                    entry["position_id"] = pid
+                    print(f"[GoldMCP] Synced position_id for entry #{i+1}: {pid}")
+
+    async def get_position_ids(self) -> list:
+        """Returns list of position_ids for all our entries."""
+        ids = []
+        for e in self.entries:
+            pid = e.get("position_id")
+            if pid:
+                ids.append(pid)
+        return ids
+
+    async def amend_sl_on_all_positions(self, new_sl_price: float):
+        """Amend SL on ALL open positions (handles hedged mode).
+        new_sl_price: absolute SL price (not pips)."""
+        pids = await self.get_position_ids()
+        if not pids:
+            print(f"[GoldMCP] amend_sl: no position_ids, can't amend")
+            return
+        for pid in pids:
+            try:
+                await self.amend_position(pid, stop_loss=new_sl_price)
+                print(f"[GoldMCP] Amended SL on pos {pid} → ${new_sl_price:.2f}")
+            except Exception as e:
+                print(f"[GoldMCP] amend_position failed for {pid}: {e}")
 
     async def manage_position(self, price):
         if not self.has_position:
             return
         avg = self.avg_price
 
-        # Extreme price tracking
+        # Sync position_ids if missing
+        if not all(e.get("position_id") for e in self.entries):
+            await self.sync_position_ids()
+
+        # Extreme price tracking + trailing SL
         if not self.is_short:
             if price > self.extreme_price:
                 self.extreme_price = price
                 td = max(self.atr * SL_ATR_MULT, price * 0.025)
                 new_sl = self.extreme_price - td
                 if new_sl > self.get_sl_price(price, self.atr):
-                    print(f"[GoldMCP] Trail SL → ${new_sl:.2f}")
+                    await self.amend_sl_on_all_positions(new_sl)
         else:
             if price < self.extreme_price:
                 self.extreme_price = price
                 td = max(self.atr * SL_ATR_MULT, price * 0.025)
                 new_sl = self.extreme_price + td
                 if new_sl < self.get_sl_price(price, self.atr):
-                    print(f"[GoldMCP] Trail SL → ${new_sl:.2f}")
+                    await self.amend_sl_on_all_positions(new_sl)
 
         # Break-even after activation pct
         pnl_pct = self.get_current_pnl_pct(price)
@@ -642,11 +707,11 @@ class GoldMCPBot:
             if not self.is_short:
                 be_sl = max(avg, avg - self.atr * 0.5)
                 if be_sl > self.get_sl_price(price, self.atr):
-                    print(f"[GoldMCP] SL to break-even ${be_sl:.2f}")
+                    await self.amend_sl_on_all_positions(be_sl)
             else:
                 be_sl = min(avg, avg + self.atr * 0.5)
                 if be_sl < self.get_sl_price(price, self.atr):
-                    print(f"[GoldMCP] SL to break-even ${be_sl:.2f}")
+                    await self.amend_sl_on_all_positions(be_sl)
 
         # TP1: close 50%
         tp1_price = self.get_tp1_price(price)
