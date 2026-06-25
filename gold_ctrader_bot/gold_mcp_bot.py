@@ -1,9 +1,15 @@
-"""GoldBot for cTrader MCP — EMA+ADX+ATR strategy with scaled entries (port of VPS gold_bot sizing)."""
+"""GoldBot for cTrader MCP — EMA+ADX+ATR strategy with scaled entries (port of VPS gold_bot sizing).
+
+VPS sync: pushes trades + state to VPS HTTP endpoint for dashboard integration.
+Configure via .env: VPS_SYNC_URL, VPS_AUTH_TOKEN, VPS_SYNC_ENABLED.
+"""
 
 import asyncio
 import json
 import time
 import os
+import urllib.request
+import urllib.error
 from datetime import datetime, timezone, timedelta
 
 import httpx
@@ -36,6 +42,11 @@ TIME_EXIT_HOURS = float(os.getenv("TIME_EXIT_HOURS", "2"))
 TRADE_LOG_PATH = os.getenv("TRADE_LOG_PATH", "trades_gold_ctrader.jsonl")
 STATE_FILE_PATH = os.getenv("STATE_FILE_PATH", "state.json")
 TARGET_PROFIT = float(os.getenv("TARGET_PROFIT", "0"))
+
+# VPS sync config
+VPS_SYNC_URL = os.getenv("VPS_SYNC_URL", "").rstrip("/")
+VPS_AUTH_TOKEN = os.getenv("VPS_AUTH_TOKEN", "")
+VPS_SYNC_ENABLED = os.getenv("VPS_SYNC_ENABLED", "false").lower() == "true"
 
 import numpy as np
 
@@ -86,6 +97,10 @@ class GoldMCPBot:
         self.trading_days = set()
         self.target_hit = False
 
+        # VPS sync state
+        self.last_state_push = 0
+        self.vps_sync_failures = 0
+
     # ─── MCP helpers ────────────────────────────────────────────────
 
     async def mcp_request(self, method, params=None):
@@ -130,6 +145,95 @@ class GoldMCPBot:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception as e:
             print(f"[GoldMCP] Trade log write failed: {e}")
+        # Push to VPS (fire-and-forget, sync to avoid blocking on Windows)
+        self._push_trade_to_vps(entry)
+
+    # ─── VPS sync ───────────────────────────────────────────────────
+
+    def _push_trade_to_vps(self, trade_data: dict):
+        """Push closed trade to VPS HTTP endpoint. Fire-and-forget."""
+        if not VPS_SYNC_ENABLED or not VPS_SYNC_URL:
+            return
+        try:
+            req = urllib.request.Request(
+                f"{VPS_SYNC_URL}/api/trade",
+                data=json.dumps(trade_data).encode(),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {VPS_AUTH_TOKEN}",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as r:
+                result = json.loads(r.read())
+            if result.get("ok"):
+                print(f"[GoldMCP] VPS sync: trade pushed (pnl={trade_data.get('pnl'):+.2f})")
+                self.vps_sync_failures = 0
+            else:
+                print(f"[GoldMCP] VPS sync failed: {result}")
+                self.vps_sync_failures += 1
+        except urllib.error.HTTPError as e:
+            print(f"[GoldMCP] VPS trade push HTTP {e.code}: {e.reason}")
+            self.vps_sync_failures += 1
+        except Exception as e:
+            print(f"[GoldMCP] VPS trade push error: {e}")
+            self.vps_sync_failures += 1
+
+    def _push_state_to_vps(self):
+        """Push current bot state to VPS HTTP endpoint. Throttled to 1/min."""
+        if not VPS_SYNC_ENABLED or not VPS_SYNC_URL:
+            return
+        now_ms = int(time.time() * 1000)
+        if now_ms - self.last_state_push < 60000:  # 1 min throttle
+            return
+        self.last_state_push = now_ms
+        state = {
+            "entries": self.entries,
+            "is_short": self.is_short,
+            "entry_time": self.entry_time,
+            "extreme_price": self.extreme_price,
+            "closed_half": self.closed_half,
+            "entry_atr": self.entry_atr,
+            "entry_ema": self.entry_ema,
+            "daily_start_balance": self.daily_start_balance,
+            "daily_loss_hit": self.daily_loss_hit,
+            "consecutive_tp": self.consecutive_tp,
+            "tp_cooldown_until": self.tp_cooldown_until,
+            "daily_pnl": self.daily_pnl,
+            "daily_pnl_day": self.daily_pnl_day,
+            "last_entry_minute": self.last_entry_minute,
+            "total_pnl": self.total_pnl,
+            "trading_days": list(self.trading_days),
+            "target_hit": self.target_hit,
+            "current_price": self.close_prices[-1] if self.close_prices else 0,
+            "ema": self.ema,
+            "atr": self.atr,
+            "adx": self.adx,
+            "timestamp": now_ms,
+        }
+        try:
+            req = urllib.request.Request(
+                f"{VPS_SYNC_URL}/api/state",
+                data=json.dumps(state).encode(),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {VPS_AUTH_TOKEN}",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as r:
+                result = json.loads(r.read())
+            if not result.get("ok"):
+                print(f"[GoldMCP] VPS state push failed: {result}")
+                self.vps_sync_failures += 1
+            else:
+                self.vps_sync_failures = 0
+        except urllib.error.HTTPError as e:
+            print(f"[GoldMCP] VPS state push HTTP {e.code}: {e.reason}")
+            self.vps_sync_failures += 1
+        except Exception as e:
+            # Silent on connection errors (VPS may be down) — don't spam log
+            self.vps_sync_failures += 1
 
     def _save_state(self):
         state = {"entries": self.entries, "is_short": self.is_short,
@@ -416,6 +520,7 @@ class GoldMCPBot:
 
         # Periodic state save (every 60s via this tick)
         self._save_state()
+        self._push_state_to_vps()
 
         # Track trading days
         if self.has_position or self.entries:

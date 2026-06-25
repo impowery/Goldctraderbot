@@ -25,8 +25,8 @@ TP2_ATR_MULT=1.5
 TRAIL_ACTIVATE_PCT=0.3
 TIME_EXIT_HOURS=2
 
-# Demo sizing: 0.05 lots/entry, 0.15 max
-# Challenge sizing: 0.20 lots/entry, 0.60 max
+# Demo sizing: 0.02 lots/entry, 0.06 max
+# Challenge sizing: 0.06 lots/entry, 0.18 max (1:20 leverage on PipFarm)
 
 TIMEFRAME=m5
 CANDLE_COUNT=100
@@ -34,3 +34,8 @@ CHECK_INTERVAL=60
 
 RECONNECT_DELAY=5
 MAX_RECONNECT_DELAY=300
+
+# --- VPS sync (push trades + state to VPS dashboard) ---
+VPS_SYNC_ENABLED=true
+VPS_SYNC_URL=http://193.233.19.171:8089
+VPS_AUTH_TOKEN=gold2026secret

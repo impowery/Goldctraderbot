@@ -27,7 +27,25 @@ EMA20 + ADX + ATR strategy with scale-in (3×0.01 lots) for XAUUSD via cTrader M
 
 | File | Purpose |
 |---|---|
-| `gold_mcp_bot.py` | Main bot (MCP client + scale-in logic) |
-| `strategy.py` | EMA+ADX+ATR signal generation |
+| `gold_mcp_bot.py` | Main bot (MCP client + scale-in logic + VPS sync) |
+| `strategy.py` | EMA+ADX+ATR signal generation (Wilder's smoothing) |
 | `config.py` | Configuration template → copy to `.env` |
 | `archive/` | Deprecated files (Open API path, C# cBot stub) |
+
+## VPS sync (optional, recommended)
+
+Bot can push closed trades + state to VPS HTTP endpoint for dashboard integration.
+
+1. VPS must run `ctrader_trades_server.py` on port 8089
+2. Add to `.env`:
+   ```
+   VPS_SYNC_ENABLED=true
+   VPS_SYNC_URL=http://your-vps-ip:8089
+   VPS_AUTH_TOKEN=gold2026secret
+   ```
+3. Bot will push:
+   - Each closed trade → `POST /api/trade` (for dashboard + Telegram alerts)
+   - State every 60s → `POST /api/state` (for live card in dashboard)
+
+Dashboard: http://your-vps-ip:8080/report_latest.html (GOLD-CTRADER appears as 7th bot)
+Telegram alerts: configure separately via `ctrader_alerts.py` on VPS
