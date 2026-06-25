@@ -101,12 +101,13 @@ MSK = timezone(timedelta(hours=3))
 def is_market_open() -> bool:
     """Check if XAUUSD market is open (PipFarm cTrader hours, MSK timezone).
     
-    Trading hours:
-    - Mon-Thu: 01:01 - 23:59 MSK
-    - Fri: 01:01 - 23:57 MSK
+    Trading hours (with safety buffer):
+    - Mon-Thu: 01:15 - 23:45 MSK
+    - Fri: 01:15 - 23:45 MSK (earlier close for safety)
     - Sat, Sun: closed
     
-    Returns True if market is open, False otherwise.
+    Note: Real market hours are 01:01-23:59, but we use 01:15-23:45
+    to avoid edge cases near session breaks.
     """
     now = datetime.now(MSK)
     weekday = now.weekday()  # 0=Mon, 6=Sun
@@ -117,9 +118,8 @@ def is_market_open() -> bool:
     
     # Mon-Fri: check time
     hour_min = now.hour * 60 + now.minute
-    open_min = 1 * 60 + 1    # 01:01 = 61 minutes
-    # Friday closes at 23:57, others at 23:59
-    close_min = 23 * 60 + 57 if weekday == 4 else 23 * 60 + 59
+    open_min = 1 * 60 + 15    # 01:15 = 75 minutes
+    close_min = 23 * 60 + 45  # 23:45 = 1425 minutes (same for all weekdays)
     
     return open_min <= hour_min <= close_min
 
@@ -130,17 +130,15 @@ def market_status_str() -> str:
     weekday = now.weekday()
     days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     if not is_market_open():
-        # Calculate next open
         if weekday == 5:  # Saturday
-            days_until_monday = 2
+            return f"CLOSED (weekend, opens Mon 01:15 MSK)"
         elif weekday == 6:  # Sunday
-            days_until_monday = 1
+            return f"CLOSED (weekend, opens Mon 01:15 MSK)"
         elif weekday == 4 and now.hour >= 23:  # Friday after close
-            days_until_monday = 3
+            return f"CLOSED (weekend, opens Mon 01:15 MSK)"
         else:
-            # Weekday night pause (23:59 - 01:01)
-            return f"CLOSED (night pause, opens 01:01 MSK)"
-        return f"CLOSED (weekend, opens Mon 01:01 MSK)"
+            # Weekday night pause (23:45 - 01:15)
+            return f"CLOSED (night pause, opens 01:15 MSK)"
     return f"OPEN ({days[weekday]} {now.strftime('%H:%M')} MSK)"
 
 
@@ -209,6 +207,9 @@ class GoldMCPRemoteBot:
         # SL tracker
         self.current_sl = 0.0
         self.last_scale_in_time = 0
+
+        # Current balance (updated each tick from cTrader)
+        self.current_balance = 0.0
 
         # VPS sync state
         self.last_state_push = 0
@@ -442,7 +443,8 @@ class GoldMCPRemoteBot:
         # 1. Balance
         bal = await self.get_balance_raw()
         balance = bal.get("balance_usd", 0) if bal else 0
-        equity = balance  # Remote MCP doesn't return equity separately in demo without positions
+        self.current_balance = balance  # track current balance for VPS sync
+        equity = bal.get("equity_usd", balance) if bal else balance
 
         # 2. Daily loss check
         if self.daily_start_balance is None:
@@ -802,6 +804,7 @@ class GoldMCPRemoteBot:
             "entry_atr": self.entry_atr,
             "entry_ema": self.entry_ema,
             "daily_start_balance": self.daily_start_balance,
+            "current_balance": self.current_balance,
             "daily_loss_hit": self.daily_loss_hit,
             "consecutive_tp": self.consecutive_tp,
             "tp_cooldown_until": self.tp_cooldown_until,
