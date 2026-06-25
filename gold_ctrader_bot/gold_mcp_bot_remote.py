@@ -94,6 +94,56 @@ def iso_now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# MSK timezone for market hours
+MSK = timezone(timedelta(hours=3))
+
+
+def is_market_open() -> bool:
+    """Check if XAUUSD market is open (PipFarm cTrader hours, MSK timezone).
+    
+    Trading hours:
+    - Mon-Thu: 01:01 - 23:59 MSK
+    - Fri: 01:01 - 23:57 MSK
+    - Sat, Sun: closed
+    
+    Returns True if market is open, False otherwise.
+    """
+    now = datetime.now(MSK)
+    weekday = now.weekday()  # 0=Mon, 6=Sun
+    
+    # Saturday (5) or Sunday (6) — closed
+    if weekday == 5 or weekday == 6:
+        return False
+    
+    # Mon-Fri: check time
+    hour_min = now.hour * 60 + now.minute
+    open_min = 1 * 60 + 1    # 01:01 = 61 minutes
+    # Friday closes at 23:57, others at 23:59
+    close_min = 23 * 60 + 57 if weekday == 4 else 23 * 60 + 59
+    
+    return open_min <= hour_min <= close_min
+
+
+def market_status_str() -> str:
+    """Return human-readable market status."""
+    now = datetime.now(MSK)
+    weekday = now.weekday()
+    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    if not is_market_open():
+        # Calculate next open
+        if weekday == 5:  # Saturday
+            days_until_monday = 2
+        elif weekday == 6:  # Sunday
+            days_until_monday = 1
+        elif weekday == 4 and now.hour >= 23:  # Friday after close
+            days_until_monday = 3
+        else:
+            # Weekday night pause (23:59 - 01:01)
+            return f"CLOSED (night pause, opens 01:01 MSK)"
+        return f"CLOSED (weekend, opens Mon 01:01 MSK)"
+    return f"OPEN ({days[weekday]} {now.strftime('%H:%M')} MSK)"
+
+
 def lots_to_volume_cents(lots: float, lot_size: int = LOT_SIZE) -> int:
     """Convert lots to cTrader volume (cents of base asset).
     XAUUSD: 0.02 lots × 100 oz × 100 = 200 cents
@@ -425,7 +475,25 @@ class GoldMCPRemoteBot:
         if not DRY_RUN:
             await self.sync_position()
 
-        # 4. Candles (every 60s)
+        # 3.5 Market hours check — skip trading when market closed
+        market_open = is_market_open()
+        if not market_open:
+            # Market closed — only fetch candles occasionally (every 5 min) to save API calls
+            if now - self.last_candle_fetch > 300000:  # 5 min
+                await self.fetch_candles()
+                self.last_candle_fetch = now
+            # Log market status every 5 min
+            if now % 300000 < 60000:
+                print(f"[Remote] Market {market_status_str()} — waiting")
+            # If we have open position, still need to manage it (SL/TP might trigger)
+            if self.has_position and self.close_prices:
+                price = self.close_prices[-1]
+                await self.manage_position(price, balance)
+            self._save_state()
+            self._push_state_to_vps()
+            return
+
+        # 4. Candles (every 60s when market is open)
         if now - self.last_candle_fetch > 60000:
             await self.fetch_candles()
             self.last_candle_fetch = now
