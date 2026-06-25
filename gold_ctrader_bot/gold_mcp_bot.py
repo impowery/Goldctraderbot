@@ -8,9 +8,18 @@ import asyncio
 import json
 import time
 import os
+import sys
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
+
+# Windows console uses cp1251 by default — force UTF-8 to avoid charmap errors
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 
 import httpx
 from dotenv import load_dotenv
@@ -675,7 +684,7 @@ class GoldMCPBot:
         for pid in pids:
             try:
                 await self.amend_position(pid, stop_loss=new_sl_price)
-                print(f"[GoldMCP] Amended SL on pos {pid} → ${new_sl_price:.2f}")
+                print(f"[GoldMCP] Amended SL on pos {pid} to ${new_sl_price:.2f}")
             except Exception as e:
                 print(f"[GoldMCP] amend_position failed for {pid}: {e}")
 
@@ -713,13 +722,13 @@ class GoldMCPBot:
                 be_sl = avg + self.atr * BE_OFFSET_ATR  # BE_OFFSET_ATR=0 → exactly entry
                 if be_sl > self.get_sl_price(price, self.atr):
                     await self.amend_sl_on_all_positions(be_sl)
-                    print(f"[GoldMCP] BREAK-EVEN: PnL {pnl_pct:.2f}% ≥ {BE_TRIGGER_PCT}% → SL={be_sl:.2f} (entry={avg:.2f})")
+                    print(f"[GoldMCP] BREAK-EVEN: PnL {pnl_pct:.2f}% >= {BE_TRIGGER_PCT}% SL={be_sl:.2f} (entry={avg:.2f})")
             else:
                 # SHORT: SL = entry - offset (below entry = locked profit)
                 be_sl = avg - self.atr * BE_OFFSET_ATR
                 if be_sl < self.get_sl_price(price, self.atr):
                     await self.amend_sl_on_all_positions(be_sl)
-                    print(f"[GoldMCP] BREAK-EVEN: PnL {pnl_pct:.2f}% ≥ {BE_TRIGGER_PCT}% → SL={be_sl:.2f} (entry={avg:.2f})")
+                    print(f"[GoldMCP] BREAK-EVEN: PnL {pnl_pct:.2f}% >= {BE_TRIGGER_PCT}% SL={be_sl:.2f} (entry={avg:.2f})")
 
         # TP1: close 50%
         tp1_price = self.get_tp1_price(price)
