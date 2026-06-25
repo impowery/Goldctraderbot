@@ -5,3 +5,7 @@ __pycache__/
 state.json
 trades_*.jsonl
 output.txt
+test_remote_*.py
+debug_pipettes.py
+fetch_trade_history.py
+state_remote.json
