@@ -30,7 +30,49 @@ EMA20 + ADX + ATR strategy with scale-in (3×0.01 lots) for XAUUSD via cTrader M
 | `gold_mcp_bot.py` | Main bot (MCP client + scale-in logic + VPS sync) |
 | `strategy.py` | EMA+ADX+ATR signal generation (Wilder's smoothing) |
 | `config.py` | Configuration template → copy to `.env` |
+| `watchdog.ps1` | Auto-restart bot if process dies |
+| `install_watchdog.bat` | Register watchdog in Windows Task Scheduler |
+| `update_bot.bat` | One-command update: stop + git pull + start |
 | `archive/` | Deprecated files (Open API path, C# cBot stub) |
+
+## Automation (set up once)
+
+### 1. Auto-start on Windows boot
+- Copy `launch_mcp_bot.bat` shortcut to `shell:startup` (Win+R → `shell:startup`)
+- Bot will start automatically after every reboot
+
+### 2. Auto-restart if crashed (Watchdog)
+```bash
+# Run as Administrator:
+install_watchdog.bat
+```
+Creates Windows Scheduled Task "GoldBot Watchdog" that:
+- Runs every 5 minutes
+- Checks if bot process is alive
+- Restarts if crashed
+
+### 3. One-command update
+```bash
+update_bot.bat
+```
+Stops bot, pulls latest from GitHub, restarts. No need for Ctrl+C + manual restart.
+
+## Manual control
+
+```bash
+# Stop bot
+taskkill /F /IM python.exe /FI "WINDOWTITLE eq gold_mcp*"
+
+# Or more precise:
+powershell "Get-Process python | Where-Object { (Get-CimInstance Win32_Process -Filter \"ProcessId=$($_.Id)\").CommandLine -like '*gold_mcp_bot*' } | Stop-Process -Force"
+
+# Start bot
+launch_mcp_bot.bat
+
+# Check logs
+type %TEMP%\gold_mcp_bot_output.txt
+type %TEMP%\gold_mcp_bot_watchdog.log
+```
 
 ## VPS sync (optional, recommended)
 
