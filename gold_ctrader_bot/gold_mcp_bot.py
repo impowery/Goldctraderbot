@@ -29,6 +29,8 @@ from strategy import should_enter, calc_ema, calc_atr, calc_adx
 load_dotenv()
 
 MCP_URL = os.getenv("MCP_URL", "http://127.0.0.1:9876/mcp/")
+# Remote MCP (cTrader Web) — set MCP_BEARER_TOKEN to switch from local to remote
+MCP_BEARER_TOKEN = os.getenv("MCP_BEARER_TOKEN", "")
 SYMBOL = os.getenv("SYMBOL_NAME", "XAUUSD")
 MIN_INTERVAL_MINUTES = int(os.getenv("MIN_INTERVAL_MINUTES", "60"))
 MAX_DAILY_LOSS_PERCENT = float(os.getenv("MAX_LOSS_PERCENT", "3.0"))
@@ -122,14 +124,21 @@ class GoldMCPBot:
 
     # ─── MCP helpers ────────────────────────────────────────────────
 
+    def _mcp_headers(self):
+        """Build headers for MCP request — includes Bearer token if set (Remote MCP)."""
+        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+        if self.session_id:
+            headers["Mcp-Session-Id"] = self.session_id
+        if MCP_BEARER_TOKEN:
+            headers["Authorization"] = f"Bearer {MCP_BEARER_TOKEN}"
+        return headers
+
     async def mcp_request(self, method, params=None):
         req_id = int(time.time() * 1000) % 100000
         body = {"jsonrpc": "2.0", "id": req_id, "method": method}
         if params:
             body["params"] = params
-        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
-        if self.session_id:
-            headers["Mcp-Session-Id"] = self.session_id
+        headers = self._mcp_headers()
         resp = await self.client.post(MCP_URL, json=body, headers=headers)
         resp.raise_for_status()
         ct = resp.headers.get("content-type", "")
@@ -305,16 +314,17 @@ class GoldMCPBot:
     # ─── Connection ─────────────────────────────────────────────────
 
     async def connect(self):
-        print(f"[GoldMCP] Connecting to {MCP_URL}...")
+        auth_str = "with Bearer token (Remote MCP)" if MCP_BEARER_TOKEN else "no auth (Local MCP)"
+        print(f"[GoldMCP] Connecting to {MCP_URL} ({auth_str})...")
         body = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
                 "params": {"protocolVersion": "2025-03-26", "capabilities": {},
                            "clientInfo": {"name": "GoldBot-MCP", "version": "2.0"}}}
-        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+        headers = self._mcp_headers()  # use shared header builder
         resp = await self.client.post(MCP_URL, json=body, headers=headers)
         resp.raise_for_status()
         self.session_id = resp.headers.get("Mcp-Session-Id") or resp.headers.get("mcp-session-id")
         if not self.session_id:
-            print(f"[GoldMCP] No session ID")
+            print(f"[GoldMCP] No session ID (response headers: {dict(resp.headers)})")
             return False
         print(f"[GoldMCP] Session: {self.session_id}")
 
