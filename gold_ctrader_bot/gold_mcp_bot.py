@@ -43,6 +43,11 @@ TRADE_LOG_PATH = os.getenv("TRADE_LOG_PATH", "trades_gold_ctrader.jsonl")
 STATE_FILE_PATH = os.getenv("STATE_FILE_PATH", "state.json")
 TARGET_PROFIT = float(os.getenv("TARGET_PROFIT", "0"))
 
+# Break-even trigger: when PnL% >= BE_TRIGGER_PCT, move SL to entry price (true break-even)
+BE_TRIGGER_PCT = float(os.getenv("BE_TRIGGER_PCT", "0.5"))
+# Break-even offset (in ATR multiples above entry): 0 = exactly entry, 0.5 = entry + 0.5×ATR
+BE_OFFSET_ATR = float(os.getenv("BE_OFFSET_ATR", "0.0"))
+
 # VPS sync config
 VPS_SYNC_URL = os.getenv("VPS_SYNC_URL", "").rstrip("/")
 VPS_AUTH_TOKEN = os.getenv("VPS_AUTH_TOKEN", "")
@@ -699,17 +704,22 @@ class GoldMCPBot:
                 if new_sl < self.get_sl_price(price, self.atr):
                     await self.amend_sl_on_all_positions(new_sl)
 
-        # Break-even after activation pct
+        # Break-even: when PnL% >= BE_TRIGGER_PCT, move SL to entry price + BE_OFFSET_ATR×ATR
+        # This is the "true break-even" — when trade is +0.5%, SL = entry price (no loss possible)
         pnl_pct = self.get_current_pnl_pct(price)
-        if abs(pnl_pct) >= TRAIL_ACTIVATE_PCT:
+        if pnl_pct >= BE_TRIGGER_PCT:
             if not self.is_short:
-                be_sl = max(avg, avg - self.atr * 0.5)
+                # LONG: SL = entry + offset (above entry = locked profit)
+                be_sl = avg + self.atr * BE_OFFSET_ATR  # BE_OFFSET_ATR=0 → exactly entry
                 if be_sl > self.get_sl_price(price, self.atr):
                     await self.amend_sl_on_all_positions(be_sl)
+                    print(f"[GoldMCP] BREAK-EVEN: PnL {pnl_pct:.2f}% ≥ {BE_TRIGGER_PCT}% → SL={be_sl:.2f} (entry={avg:.2f})")
             else:
-                be_sl = min(avg, avg + self.atr * 0.5)
+                # SHORT: SL = entry - offset (below entry = locked profit)
+                be_sl = avg - self.atr * BE_OFFSET_ATR
                 if be_sl < self.get_sl_price(price, self.atr):
                     await self.amend_sl_on_all_positions(be_sl)
+                    print(f"[GoldMCP] BREAK-EVEN: PnL {pnl_pct:.2f}% ≥ {BE_TRIGGER_PCT}% → SL={be_sl:.2f} (entry={avg:.2f})")
 
         # TP1: close 50%
         tp1_price = self.get_tp1_price(price)
