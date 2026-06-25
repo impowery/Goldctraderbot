@@ -111,6 +111,11 @@ class GoldMCPBot:
         self.trading_days = set()
         self.target_hit = False
 
+        # Current SL tracker (updated by amend_sl_on_all_positions)
+        # Used to compare new_sl > current_sl (only move SL up, never down)
+        self.current_sl = 0.0
+        self.last_scale_in_time = 0  # for scale-in cooldown
+
         # VPS sync state
         self.last_state_push = 0
         self.vps_sync_failures = 0
@@ -395,25 +400,35 @@ class GoldMCPBot:
         return len(self.entries) > 0
 
     def get_sl_price(self, price, atr):
-        td = max(atr * SL_ATR_MULT, price * 0.025)
+        # BUG FIX: removed 'price * 0.025' fallback — for XAUUSD ($4000) it gave
+        # $100 which is 5x larger than 2×ATR ($20). SL went to $3936 instead of $4018.
+        # Now SL is purely ATR-based.
+        td = atr * SL_ATR_MULT
         if not self.is_short:
             return round(self.extreme_price - td, self.digits)
         else:
             return round(self.extreme_price + td, self.digits)
 
     def get_tp1_price(self, price):
-        td = max(self.entry_atr * TP1_ATR_MULT, self.avg_price * 0.005)
+        # BUG FIX: removed 'avg_price * 0.005' fallback — same issue, gave $20 instead of $9.6
+        td = self.entry_atr * TP1_ATR_MULT
         if not self.is_short:
             return round(self.avg_price + td, self.digits)
         else:
             return round(self.avg_price - td, self.digits)
 
     def get_tp2_price(self, price):
-        td = max(self.entry_atr * TP2_ATR_MULT, self.avg_price * 0.01)
+        # BUG FIX: removed 'avg_price * 0.01' fallback — gave $40 instead of $48
+        td = self.entry_atr * TP2_ATR_MULT
         if not self.is_short:
             return round(self.avg_price + td, self.digits)
         else:
             return round(self.avg_price - td, self.digits)
+
+    def get_current_sl(self) -> float:
+        """Returns current SL from entries (first entry's SL, or 0 if not set)."""
+        # Track SL in self.current_sl variable (updated by amend_sl_on_all_positions)
+        return getattr(self, 'current_sl', 0.0)
 
     def get_current_pnl_pct(self, price):
         if not self.has_position:
@@ -578,18 +593,41 @@ class GoldMCPBot:
         await self.open_entry(side, price, balance)
 
     async def sync_position(self):
-        """Sync self.entries with actual cTrader positions."""
+        """Sync self.entries with actual cTrader positions.
+        If position was closed externally (manual close in cTrader) — record trade."""
         pos_data = await self.get_positions_raw()
         our_positions = []
         if pos_data and isinstance(pos_data, dict):
+            # FIX: removed label filter — sync ALL positions for symbol
+            # (label may not be returned by MCP, or may differ)
             for p in pos_data.get("positions", []):
-                if p.get("symbolName") == SYMBOL and p.get("label", "").startswith("GoldBot"):
+                if p.get("symbolName") == SYMBOL:
                     our_positions.append(p)
 
         if not our_positions and self.has_position:
-            print(f"[GoldMCP] Position closed externally — resetting")
+            # Position was closed externally (manual close, SL hit, TP hit in cTrader)
+            # BUG FIX: was just clearing entries — now records trade for PnL tracking
+            print(f"[GoldMCP] Position closed externally — recording trade")
+            entry_price = self.avg_price if self.entries else 0
+            entries_used = len(self.entries)
+            exit_price = self.close_prices[-1] if self.close_prices else 0
+            # Get balance delta as PnL (can't know exact fill price, use current price)
+            bal_now = await self.get_balance_raw()
+            if bal_now and self.daily_start_balance:
+                bal_val = float(bal_now.get("balance", 0))
+                # PnL = current balance - daily_start - already_recorded_pnl
+                pnl = bal_val - self.daily_start_balance - self.total_pnl
+            else:
+                pnl = 0
+            if entry_price > 0:
+                self.total_pnl += pnl
+                self._write_trade("EXTERNAL_CLOSE", entry_price, exit_price, pnl, entries_used)
+                print(f"[GoldMCP] External close recorded | PnL: ${pnl:+.2f} | total: ${self.total_pnl:+.2f}")
             self.entries = []
             self.closed_half = False
+            self.current_sl = 0.0  # reset SL tracker
+            self.extreme_price = 0.0
+            self._save_state()
 
     async def fetch_candles(self):
         bars_resp = await self.get_trendbars(SYMBOL, TIMEFRAME, CANDLE_COUNT)
@@ -639,6 +677,12 @@ class GoldMCPBot:
             print(f"[GoldMCP] Entry #{entry_idx + 1} done | avg={self.avg_price:.2f} vol={self.total_volume:.2f} "
                   f"pos_id={position_id} SL={sl_pips}p TP={tp_pips}p")
             await asyncio.sleep(2)
+            # Set initial current_sl based on the SL we just set
+            if not self.is_short:
+                self.current_sl = price - (atr_for_sl * SL_ATR_MULT)
+            else:
+                self.current_sl = price + (atr_for_sl * SL_ATR_MULT)
+            print(f"[GoldMCP] Initial SL set: ${self.current_sl:.2f}")
         else:
             print(f"[GoldMCP] Entry #{entry_idx + 1} failed")
 
@@ -676,7 +720,8 @@ class GoldMCPBot:
 
     async def amend_sl_on_all_positions(self, new_sl_price: float):
         """Amend SL on ALL open positions (handles hedged mode).
-        new_sl_price: absolute SL price (not pips)."""
+        new_sl_price: absolute SL price (not pips).
+        Updates self.current_sl for tracking."""
         pids = await self.get_position_ids()
         if not pids:
             print(f"[GoldMCP] amend_sl: no position_ids, can't amend")
@@ -687,6 +732,8 @@ class GoldMCPBot:
                 print(f"[GoldMCP] Amended SL on pos {pid} to ${new_sl_price:.2f}")
             except Exception as e:
                 print(f"[GoldMCP] amend_position failed for {pid}: {e}")
+        # Update current_sl tracker
+        self.current_sl = new_sl_price
 
     async def manage_position(self, price):
         if not self.has_position:
@@ -698,19 +745,23 @@ class GoldMCPBot:
             await self.sync_position_ids()
 
         # Extreme price tracking + trailing SL
+        # BUG FIX: compare new_sl with self.current_sl (actual SL in cTrader)
+        # instead of get_sl_price() which was always equal to new_sl (dead comparison)
         if not self.is_short:
             if price > self.extreme_price:
                 self.extreme_price = price
-                td = max(self.atr * SL_ATR_MULT, price * 0.025)
+                td = self.atr * SL_ATR_MULT  # FIX: removed price * 0.025
                 new_sl = self.extreme_price - td
-                if new_sl > self.get_sl_price(price, self.atr):
+                # Only move SL UP (never down) — compare with actual current SL
+                if self.current_sl == 0 or new_sl > self.current_sl:
                     await self.amend_sl_on_all_positions(new_sl)
         else:
             if price < self.extreme_price:
                 self.extreme_price = price
-                td = max(self.atr * SL_ATR_MULT, price * 0.025)
+                td = self.atr * SL_ATR_MULT  # FIX: removed price * 0.025
                 new_sl = self.extreme_price + td
-                if new_sl < self.get_sl_price(price, self.atr):
+                # Only move SL DOWN (never up) — compare with actual current SL
+                if self.current_sl == 0 or new_sl < self.current_sl:
                     await self.amend_sl_on_all_positions(new_sl)
 
         # Break-even: when PnL% >= BE_TRIGGER_PCT, move SL to entry price + BE_OFFSET_ATR×ATR
@@ -720,13 +771,15 @@ class GoldMCPBot:
             if not self.is_short:
                 # LONG: SL = entry + offset (above entry = locked profit)
                 be_sl = avg + self.atr * BE_OFFSET_ATR  # BE_OFFSET_ATR=0 → exactly entry
-                if be_sl > self.get_sl_price(price, self.atr):
+                # Only move SL UP (never down)
+                if self.current_sl == 0 or be_sl > self.current_sl:
                     await self.amend_sl_on_all_positions(be_sl)
                     print(f"[GoldMCP] BREAK-EVEN: PnL {pnl_pct:.2f}% >= {BE_TRIGGER_PCT}% SL={be_sl:.2f} (entry={avg:.2f})")
             else:
                 # SHORT: SL = entry - offset (below entry = locked profit)
                 be_sl = avg - self.atr * BE_OFFSET_ATR
-                if be_sl < self.get_sl_price(price, self.atr):
+                # Only move SL DOWN (never up)
+                if self.current_sl == 0 or be_sl < self.current_sl:
                     await self.amend_sl_on_all_positions(be_sl)
                     print(f"[GoldMCP] BREAK-EVEN: PnL {pnl_pct:.2f}% >= {BE_TRIGGER_PCT}% SL={be_sl:.2f} (entry={avg:.2f})")
 
@@ -751,22 +804,30 @@ class GoldMCPBot:
             await self.close_all("TP")
             return
 
-        # Scale-in
+        # Scale-in — with cooldown to prevent 3 entries in 2 minutes
+        # BUG FIX: was no cooldown, bot opened 3 entries in 2-3 min (overexposure)
+        SCALE_IN_COOLDOWN_SEC = 300  # 5 minutes between scale-in entries
         if len(self.entries) < MAX_ENTRIES and not self.closed_half:
-            pnl_pct = self.get_current_pnl_pct(price)
-            if pnl_pct > -0.5:
-                can_scale = (self.is_short and price <= self.ema and price < avg) or \
-                            (not self.is_short and price >= self.ema and price > avg)
-                # For 3rd entry: don't if price reversed past first entry
-                if len(self.entries) == 2:
-                    if self.is_short and price >= self.entries[0]["price"]:
-                        can_scale = False
-                    if not self.is_short and price <= self.entries[0]["price"]:
-                        can_scale = False
-                if can_scale:
-                    bal = await self.get_balance_raw()
-                    balance = float(bal.get("balance") or 0) if bal else 0
-                    await self.open_entry("sell" if self.is_short else "buy", price, balance)
+            now_ms = int(time.time() * 1000)
+            time_since_last_scale = (now_ms - self.last_scale_in_time) / 1000 if self.last_scale_in_time > 0 else 999
+            if time_since_last_scale < SCALE_IN_COOLDOWN_SEC:
+                pass  # too soon, skip scale-in
+            else:
+                pnl_pct = self.get_current_pnl_pct(price)
+                if pnl_pct > -0.5:
+                    can_scale = (self.is_short and price <= self.ema and price < avg) or \
+                                (not self.is_short and price >= self.ema and price > avg)
+                    # For 3rd entry: don't if price reversed past first entry
+                    if len(self.entries) == 2:
+                        if self.is_short and price >= self.entries[0]["price"]:
+                            can_scale = False
+                        if not self.is_short and price <= self.entries[0]["price"]:
+                            can_scale = False
+                    if can_scale:
+                        bal = await self.get_balance_raw()
+                        balance = float(bal.get("balance") or 0) if bal else 0
+                        self.last_scale_in_time = now_ms  # update cooldown timer
+                        await self.open_entry("sell" if self.is_short else "buy", price, balance)
 
         # Time exit
         hrs = (int(time.time() * 1000) - self.entry_time) / 3600000
@@ -804,6 +865,9 @@ class GoldMCPBot:
             print(f"[GoldMCP] Closed {entries_used} entries | PnL: ${pnl:+.2f} | total: ${self.total_pnl:+.2f}")
         self.entries = []
         self.closed_half = False
+        self.current_sl = 0.0  # reset SL tracker
+        self.extreme_price = 0.0
+        self.last_scale_in_time = 0  # reset scale-in cooldown
         self._save_state()
 
 
