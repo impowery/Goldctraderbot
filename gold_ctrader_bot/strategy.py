@@ -21,11 +21,12 @@ def calc_sma(prices: list[float], period: int) -> float:
 
 
 def calc_adx(high: list[float], low: list[float], close: list[float], period: int = 14) -> float:
-    if len(high) < period + 1:
+    n = len(high)
+    if n < period * 2:
         return 0.0
 
     tr_values, plus_dm, minus_dm = [], [], []
-    for i in range(1, len(high)):
+    for i in range(1, n):
         tr = max(high[i] - low[i], abs(high[i] - close[i - 1]), abs(low[i] - close[i - 1]))
         tr_values.append(tr)
         up_move = high[i] - high[i - 1]
@@ -39,11 +40,25 @@ def calc_adx(high: list[float], low: list[float], close: list[float], period: in
         else:
             minus_dm.append(0.0)
 
-    atr = calc_sma(tr_values, period)
-    plus_di = 100 * calc_sma(plus_dm, period) / atr if atr > 0 else 0
-    minus_di = 100 * calc_sma(minus_dm, period) / atr if atr > 0 else 0
-    dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100 if (plus_di + minus_di) > 0 else 0
-    return dx
+    atr = sum(tr_values[:period]) / period
+    pdm = sum(plus_dm[:period]) / period
+    mdm = sum(minus_dm[:period]) / period
+    dx_values = []
+    for i in range(period, len(tr_values)):
+        atr = (atr * (period - 1) + tr_values[i]) / period
+        pdm = (pdm * (period - 1) + plus_dm[i]) / period
+        mdm = (mdm * (period - 1) + minus_dm[i]) / period
+        pdi = 100 * pdm / atr if atr > 0 else 0
+        mdi = 100 * mdm / atr if atr > 0 else 0
+        if (pdi + mdi) > 0:
+            dx_values.append(abs(pdi - mdi) / (pdi + mdi) * 100)
+
+    if len(dx_values) < period:
+        return dx_values[-1] if dx_values else 0.0
+    adx = sum(dx_values[:period]) / period
+    for dx in dx_values[period:]:
+        adx = (adx * (period - 1) + dx) / period
+    return adx
 
 
 def calc_atr(high: list[float], low: list[float], close: list[float], period: int = 14) -> float:

@@ -33,6 +33,9 @@ TP2_ATR_MULT = float(os.getenv("TP2_ATR_MULT", "1.5"))
 TRAIL_ACTIVATE_PCT = float(os.getenv("TRAIL_ACTIVATE_PCT", "0.3"))
 TIME_EXIT_HOURS = float(os.getenv("TIME_EXIT_HOURS", "2"))
 
+TRADE_LOG_PATH = os.getenv("TRADE_LOG_PATH", "trades_gold_ctrader.jsonl")
+STATE_FILE_PATH = os.getenv("STATE_FILE_PATH", "state.json")
+
 import numpy as np
 
 
@@ -109,6 +112,60 @@ class GoldMCPBot:
                 if item.get("type") == "text":
                     return json.loads(item.get("text", "{}"))
         return result
+
+    def _write_trade(self, reason, entry_price, exit_price, pnl, entries_used):
+        entry = {"ts": iso_now(), "type": "SHORT" if self.is_short else "LONG",
+                 "entry_price": round(entry_price, self.digits),
+                 "exit_price": round(exit_price, self.digits),
+                 "pnl": round(pnl, 2), "reason": reason,
+                 "entries": entries_used, "version": "mcp-v1"}
+        try:
+            with open(TRADE_LOG_PATH, "a") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception as e:
+            print(f"[GoldMCP] Trade log write failed: {e}")
+
+    def _save_state(self):
+        state = {"entries": self.entries, "is_short": self.is_short,
+                 "entry_time": self.entry_time, "extreme_price": self.extreme_price,
+                 "closed_half": self.closed_half, "entry_atr": self.entry_atr,
+                 "entry_ema": self.entry_ema, "daily_start_balance": self.daily_start_balance,
+                 "daily_loss_hit": self.daily_loss_hit, "consecutive_tp": self.consecutive_tp,
+                 "tp_cooldown_until": self.tp_cooldown_until, "daily_pnl": self.daily_pnl,
+                 "daily_pnl_day": self.daily_pnl_day, "last_entry_minute": self.last_entry_minute}
+        tmp = STATE_FILE_PATH + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(state, f)
+            os.replace(tmp, STATE_FILE_PATH)
+        except Exception as e:
+            print(f"[GoldMCP] State save failed: {e}")
+
+    def _load_state(self):
+        if not os.path.exists(STATE_FILE_PATH):
+            return
+        try:
+            with open(STATE_FILE_PATH) as f:
+                state = json.load(f)
+            self.entries = state.get("entries", [])
+            self.is_short = state.get("is_short", False)
+            self.entry_time = state.get("entry_time", 0)
+            self.extreme_price = state.get("extreme_price", 0.0)
+            self.closed_half = state.get("closed_half", False)
+            self.entry_atr = state.get("entry_atr", 0.0)
+            self.entry_ema = state.get("entry_ema", 0.0)
+            self.daily_start_balance = state.get("daily_start_balance")
+            self.daily_loss_hit = state.get("daily_loss_hit", False)
+            self.consecutive_tp = state.get("consecutive_tp", 0)
+            self.tp_cooldown_until = state.get("tp_cooldown_until", 0)
+            self.daily_pnl = state.get("daily_pnl", 0.0)
+            self.daily_pnl_day = state.get("daily_pnl_day", "")
+            self.last_entry_minute = state.get("last_entry_minute", -1)
+            if self.entries:
+                print(f"[GoldMCP] State restored: {len(self.entries)} entries, "
+                      f"{'SHORT' if self.is_short else 'LONG'} @ {self.avg_price}")
+        except Exception as e:
+            print(f"[GoldMCP] State load failed: {e}")
 
     # ─── Connection ─────────────────────────────────────────────────
 
@@ -264,6 +321,8 @@ class GoldMCPBot:
         print(f"[GoldMCP] Bot v2 | {SYMBOL} | entries={ENTRY_VOLUMES} lots "
               f"| max={MAX_ENTRIES} | SL={SL_ATR_MULT}atr | TP1={TP1_ATR_MULT}atr TP2={TP2_ATR_MULT}atr")
 
+        self._load_state()
+
         # Restore cTrader position on restart
         pos_data = await self.get_positions_raw()
         if pos_data and isinstance(pos_data, dict):
@@ -333,6 +392,9 @@ class GoldMCPBot:
 
         print(f"[GoldMCP] ${price:.2f} | EMA={self.ema:.1f} ADX={self.adx:.1f} ATR={self.atr:.2f} "
               f"| Balance={balance:.0f} Pos={self.total_volume:.2f}lots")
+
+        # Periodic state save (every 60s via this tick)
+        self._save_state()
 
         # 5. Manage existing position
         if self.has_position:
@@ -460,6 +522,8 @@ class GoldMCPBot:
                 print(f"[GoldMCP] TP1 hit @ ${price:.2f} — closing {half_vol} lots (50%)")
                 await self.close_position_partial(0, half_vol)
                 self.closed_half = True
+                self._write_trade("TP1", self.avg_price, price, 0, len(self.entries))
+                self._save_state()
                 return
 
         # TP2: full close
@@ -494,6 +558,8 @@ class GoldMCPBot:
             await self.close_all("TIME")
 
     async def close_all(self, reason):
+        entry_price = self.avg_price if self.entries else 0
+        entries_used = len(self.entries)
         if reason == "TP":
             self.consecutive_tp += 1
             if self.consecutive_tp >= 3:
@@ -501,9 +567,16 @@ class GoldMCPBot:
         else:
             self.consecutive_tp = 0
         print(f"[GoldMCP] Closing all — {reason}")
+        bal_before = await self.get_balance_raw()
         await self.call("close_all_positions", {"symbolName": SYMBOL})
+        bal_after = await self.get_balance_raw()
+        if bal_before and bal_after and entry_price > 0:
+            exit_price = self.close_prices[-1] if self.close_prices else 0
+            pnl = float(bal_after.get("balance", 0)) - float(bal_before.get("balance", 0))
+            self._write_trade(reason, entry_price, exit_price, pnl, entries_used)
         self.entries = []
         self.closed_half = False
+        self._save_state()
 
 
 async def main():
