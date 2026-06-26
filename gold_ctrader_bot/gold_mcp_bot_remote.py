@@ -636,21 +636,19 @@ class GoldMCPRemoteBot:
             "volume": volume_cents,
         }
 
-        # Convert absolute SL/TP prices to relative points
-        # Current price = close_prices[-1] (or spot price)
+        # Convert absolute SL/TP prices to relative PIPETTES
+        # relativeStopLoss/TakeProfit are in PIPETTES (price × 10^pip_digits)
+        # Must be rounded to step of 100 pipettes (cTrader precision requirement)
+        # Example: SL $460 below entry → 460 × 100000 = 46000000 → round to 46000000
         cur_price = self.close_prices[-1] if self.close_prices else 0
         if sl_price and cur_price:
-            if trade_side == "BUY":
-                sl_points = int((cur_price - sl_price) / (10 ** -self.pip_digits))
-            else:
-                sl_points = int((sl_price - cur_price) / (10 ** -self.pip_digits))
-            args["relativeStopLoss"] = max(sl_points, 1)
+            price_diff = abs(cur_price - sl_price)
+            sl_pipettes = int(round(price_diff * (10 ** self.pip_digits) / 100) * 100)
+            args["relativeStopLoss"] = max(sl_pipettes, 100)
         if tp_price and cur_price:
-            if trade_side == "BUY":
-                tp_points = int((tp_price - cur_price) / (10 ** -self.pip_digits))
-            else:
-                tp_points = int((cur_price - tp_price) / (10 ** -self.pip_digits))
-            args["relativeTakeProfit"] = max(tp_points, 1)
+            price_diff = abs(tp_price - cur_price)
+            tp_pipettes = int(round(price_diff * (10 ** self.pip_digits) / 100) * 100)
+            args["relativeTakeProfit"] = max(tp_pipettes, 100)
 
         if DRY_RUN:
             print(f"[Remote] DRY RUN — would call create_order: {json.dumps(args)}")
@@ -819,6 +817,7 @@ class GoldMCPRemoteBot:
             "ema": self.ema,
             "atr": self.atr,
             "adx": self.adx,
+            "symbol_name": SYMBOL,  # for multi-bot routing on VPS server
             "timestamp": now_ms,
         }
         try:
@@ -996,11 +995,10 @@ class GoldMCPRemoteBot:
                 position_id = order.get("positionId") or order.get("position_id")
             self.entries.append({"price": price, "volume_lots": vol, "position_id": position_id})
             self.last_entry_minute = datetime.now().minute
-            sl_pips = int(atr_for_sl * SL_ATR_MULT / (10 ** -self.pip_digits))
-            tp_pips = int(atr_for_sl * TP2_ATR_MULT / (10 ** -self.pip_digits))
             print(f"[Remote] Entry #{entry_idx + 1} done | avg={self.avg_price:.2f} vol={self.total_volume:.2f} "
                   f"pos_id={position_id} SL=${sl_price:.2f} TP=${tp_price:.2f}")
             await asyncio.sleep(2)
+            # SL/TP set via relativeStopLoss/TakeProfit in create_order (pipettes)
             # Set initial current_sl
             self.current_sl = sl_price
             print(f"[Remote] Initial SL set: ${self.current_sl:.2f}")
