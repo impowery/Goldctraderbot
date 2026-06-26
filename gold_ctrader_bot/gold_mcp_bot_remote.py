@@ -1031,8 +1031,9 @@ class GoldMCPRemoteBot:
         vol = self.entry_volume(entry_idx)
         print(f"[Remote] Entry #{entry_idx + 1}: {side.upper()} {vol} lots @ ${price:.2f}")
 
-        # Every entry gets SL/TP
+        # Every entry gets SL; last entry gets NO TP (ride the trend)
         atr_for_sl = self.atr if self.atr > 0 else (self.entry_atr if self.entry_atr > 0 else 10)
+        is_last_entry = (entry_idx == MAX_ENTRIES - 1)
         if not self.is_short:
             sl_price = price - atr_for_sl * SL_ATR_MULT
             tp_price = price + atr_for_sl * TP2_ATR_MULT
@@ -1040,16 +1041,24 @@ class GoldMCPRemoteBot:
             sl_price = price + atr_for_sl * SL_ATR_MULT
             tp_price = price - atr_for_sl * TP2_ATR_MULT
 
-        order = await self.place_market_order(side, vol, sl_price, tp_price)
+        # Last entry: no TP — ride the trend with trailing SL only
+        if is_last_entry:
+            print(f"[Remote] Last entry — no TP, riding trend with trailing SL")
+            order = await self.place_market_order(side, vol, sl_price, None)
+        else:
+            order = await self.place_market_order(side, vol, sl_price, tp_price)
 
         if order:
             position_id = None
             if isinstance(order, dict) and not order.get("dry_run"):
                 position_id = order.get("positionId") or order.get("position_id")
-            self.entries.append({"price": price, "volume_lots": vol, "position_id": position_id, "tp_price": tp_price, "sl_price": sl_price})
+            # Store tp_price=0 for last entry (no TP, rides trend)
+            stored_tp = tp_price if not is_last_entry else 0
+            self.entries.append({"price": price, "volume_lots": vol, "position_id": position_id, "tp_price": stored_tp, "sl_price": sl_price})
             self.last_entry_minute = datetime.now().minute
+            tp_str = f"${tp_price:.2f}" if not is_last_entry else "NONE (ride trend)"
             print(f"[Remote] Entry #{entry_idx + 1} done | avg={self.avg_price:.2f} vol={self.total_volume:.2f} "
-                  f"pos_id={position_id} SL=${sl_price:.2f} TP=${tp_price:.2f}")
+                  f"pos_id={position_id} SL=${sl_price:.2f} TP={tp_str}")
             await asyncio.sleep(2)
             # Check if TP/SL were actually set, amend if not
             if position_id and not DRY_RUN:
@@ -1131,12 +1140,35 @@ class GoldMCPRemoteBot:
                 self._save_state()
                 return
 
-        # TP2: full close
+        # TP2: close entries that HAVE TP (not the last entry which rides the trend)
         tp2_price = self.get_tp2_price(price)
         hit_tp = (not self.is_short and price >= tp2_price) or (self.is_short and price <= tp2_price)
         if hit_tp:
-            print(f"[Remote] TP2 hit @ ${price:.2f} — closing all")
-            await self.close_all("TP")
+            # Close entries with tp_price > 0, keep entries without TP (last entry)
+            entries_with_tp = [e for e in self.entries if e.get("tp_price", 0) > 0]
+            entries_without_tp = [e for e in self.entries if e.get("tp_price", 0) <= 0]
+            if entries_with_tp:
+                print(f"[Remote] TP2 hit @ ${price:.2f} — closing {len(entries_with_tp)} entries with TP")
+                if not DRY_RUN:
+                    for entry in entries_with_tp:
+                        pid = entry.get("position_id")
+                        vol = entry.get("volume_lots", 0)
+                        if pid:
+                            await self.close_position_partial(pid, vol)
+                            print(f"[Remote] Closed pos {pid} ({vol} lots)")
+                self._write_trade("TP2", self.avg_price, price, 0, len(entries_with_tp))
+                self.entries = entries_without_tp  # keep only last entry (no TP)
+                self._save_state()
+                if not self.entries:
+                    # No entries left — all closed
+                    self.has_position = False
+                    self.closed_half = False
+                    self.current_sl = 0.0
+                    self.extreme_price = 0.0
+                    self.last_scale_in_time = 0
+                    self._save_state()
+                    return
+                print(f"[Remote] {len(self.entries)} entry(ies) remaining — riding trend")
             return
 
         # Scale-in with cooldown
@@ -1155,11 +1187,13 @@ class GoldMCPRemoteBot:
                         self.last_scale_in_time = now_ms
                         await self.open_entry("sell" if self.is_short else "buy", price, balance)
 
-        # Time exit
-        hrs = (int(time.time() * 1000) - self.entry_time) / 3600000
-        if hrs >= TIME_EXIT_HOURS and abs(pnl_pct) < 1:
-            print(f"[Remote] Time exit ({hrs:.1f}h, PnL {pnl_pct:.2f}%)")
-            await self.close_all("TIME")
+        # Time exit — skip for last entry (ride the trend)
+        has_tp_entries = any(e.get("tp_price", 0) > 0 for e in self.entries)
+        if has_tp_entries:
+            hrs = (int(time.time() * 1000) - self.entry_time) / 3600000
+            if hrs >= TIME_EXIT_HOURS and abs(pnl_pct) < 1:
+                print(f"[Remote] Time exit ({hrs:.1f}h, PnL {pnl_pct:.2f}%)")
+                await self.close_all("TIME")
 
     async def close_all(self, reason):
         entry_price = self.avg_price if self.entries else 0
