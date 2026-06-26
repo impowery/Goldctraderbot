@@ -893,7 +893,7 @@ class GoldMCPRemoteBot:
             self.entry_time = state.get("entry_time", 0)
             self.extreme_price = state.get("extreme_price", 0.0)
             self.closed_half = state.get("closed_half", False)
-            self.entry_atr = state.get("entry_atr", 0.0)
+            self.entry_atr = state.get("entry_atr", 0.0) or self.atr
             self.entry_ema = state.get("entry_ema", 0.0)
             self.daily_start_balance = state.get("daily_start_balance")
             self.daily_loss_hit = state.get("daily_loss_hit", False)
@@ -982,13 +982,14 @@ class GoldMCPRemoteBot:
             return
         # Use stored TP per entry — if not stored, calculate from entry price
         tp_offset = self.entry_atr * TP2_ATR_MULT if self.entry_atr > 0 else self.atr * TP2_ATR_MULT
-        for entry in self.entries:
+        for i, entry in enumerate(self.entries):
             pid = entry.get("position_id")
             if not pid:
                 continue
             tp_price = entry.get("tp_price", 0)
-            # If no stored TP, calculate it
-            if tp_price <= 0:
+            is_last = (i == len(self.entries) - 1)
+            # If no stored TP, calculate it (skip for last entry ??? rides trend)
+            if tp_price <= 0 and not is_last:
                 entry_price = entry.get("price", 0)
                 if entry_price > 0:
                     if not self.is_short:
@@ -997,6 +998,8 @@ class GoldMCPRemoteBot:
                         tp_price = entry_price - tp_offset
                     entry["tp_price"] = tp_price  # save for next time
                     print(f"[Remote] Calculated missing TP=${tp_price:.3f} for pos {pid}")
+            if is_last and tp_price <= 0:
+                print(f"[Remote] Last entry (pos {pid}) ??? no TP, riding trend")
             try:
                 if tp_price > 0:
                     result = await self.amend_position(pid, stop_loss=new_sl_price, take_profit=tp_price)
@@ -1005,7 +1008,11 @@ class GoldMCPRemoteBot:
                     else:
                         print(f"[Remote] Amended SL=${new_sl_price:.3f} TP=${tp_price:.3f} on pos {pid}")
                 else:
-                    print(f"[Remote] WARNING: no TP for pos {pid}, skipping amend")
+                    result = await self.amend_position(pid, stop_loss=new_sl_price, take_profit=None)
+                    if result is None:
+                        print(f"[Remote] amend_position returned error for {pid} - SL not updated")
+                    else:
+                        print(f"[Remote] Amended SL=${new_sl_price:.3f} (no TP ??? ride trend)")
             except Exception as e:
                 print(f"[Remote] amend_position failed for {pid}: {e}")
                 success = False
@@ -1022,6 +1029,9 @@ class GoldMCPRemoteBot:
             self.entry_ema = self.ema
             self.closed_half = False
             self.entries = []
+        else:
+            # Scale-in: preserve extreme_price and current_sl, do NOT reset them
+            pass
 
         entry_idx = len(self.entries)
         if entry_idx >= MAX_ENTRIES:
@@ -1067,7 +1077,11 @@ class GoldMCPRemoteBot:
                 actual_sl = pos.get("stopLoss")
                 needs_amend = False
                 if not actual_tp or actual_tp == 0:
-                    print(f"[Remote] TP missing — will amend to ${tp_price:.3f}")
+                    if not is_last_entry and (not actual_tp or actual_tp == 0):
+                        print(f"[Remote] TP missing ??? will amend to ${tp_price:.3f}")
+                        needs_amend = True
+                    elif is_last_entry and (not actual_tp or actual_tp == 0):
+                        print(f"[Remote] Last entry ??? TP skipped intentionally, trailing SL only")
                     needs_amend = True
                 if not actual_sl or actual_sl == 0:
                     print(f"[Remote] SL missing — will amend to ${sl_price:.3f}")
@@ -1075,8 +1089,15 @@ class GoldMCPRemoteBot:
                 if needs_amend:
                     await self.amend_position(position_id, stop_loss=sl_price, take_profit=tp_price)
                     print(f"[Remote] Amended SL=${sl_price:.3f} TP=${tp_price:.3f} on pos {position_id}")
-            # Set initial current_sl
-            self.current_sl = sl_price
+            # Set initial current_sl ??? only if higher (LONG) or lower (SHORT) than existing
+            if not self.entries or len(self.entries) <= 1:
+                self.current_sl = sl_price
+            elif self.is_short:
+                if sl_price < self.current_sl:
+                    self.current_sl = sl_price
+            else:
+                if sl_price > self.current_sl:
+                    self.current_sl = sl_price
             print(f"[Remote] Initial SL set: ${self.current_sl:.2f}")
             if not DRY_RUN:
                 await self.sync_position_ids()
