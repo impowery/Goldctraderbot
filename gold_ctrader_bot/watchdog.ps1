@@ -1,11 +1,15 @@
-# GoldBot Watchdog — restarts bot if Python process dies
+# GoldBot Watchdog — restarts bot (+ cTrader) if process dies
 # Run via Task Scheduler every 5 minutes
-# Or: run in background via startup
 
 $botName = "gold_mcp_bot"
 $python = "C:\Users\Андрей\AppData\Local\Programs\Python\Python312\python.exe"
 $botPath = "C:\Users\Андрей\Desktop\BOT live BTC\Ctrader\gold_ctrader_bot\gold_mcp_bot.py"
 $workDir = "C:\Users\Андрей\Desktop\BOT live BTC\Ctrader\gold_ctrader_bot"
+$ctraderDir = "$env:LOCALAPPDATA\Spotware\cTrader"
+$ctraderPath = if (Test-Path $ctraderDir) {
+    $folder = Get-ChildItem -Path $ctraderDir -Directory | Select-Object -First 1
+    if ($folder) { Join-Path $folder.FullName "cTrader.exe" } else { $null }
+} else { $null }
 $logFile = "$env:TEMP\gold_mcp_bot_watchdog.log"
 
 function Write-Log($msg) {
@@ -14,7 +18,21 @@ function Write-Log($msg) {
     Write-Host "$ts $msg"
 }
 
-# Check if bot process is running
+# 1. Check cTrader Desktop — if not running, start it
+$ct = Get-Process -Name "cTrader" -ErrorAction SilentlyContinue
+if (-not $ct) {
+    Write-Log "cTrader NOT running — starting..."
+    try {
+        Start-Process -FilePath $ctraderPath
+        Write-Log "cTrader launched"
+    } catch {
+        Write-Log "ERROR starting cTrader: $_"
+    }
+} else {
+    # Already running — silently OK
+}
+
+# 2. Check if bot process is running
 $proc = Get-Process -Name "python" -ErrorAction SilentlyContinue | Where-Object {
     try {
         $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)").CommandLine
@@ -23,7 +41,6 @@ $proc = Get-Process -Name "python" -ErrorAction SilentlyContinue | Where-Object 
 }
 
 if ($proc) {
-    # Bot is running, check if it's actually alive (state push within last 5 min)
     Write-Log "Bot process running (PID $($proc.Id)) - OK"
     exit 0
 }
@@ -31,21 +48,13 @@ if ($proc) {
 # Bot not running - restart it
 Write-Log "Bot NOT running - restarting..."
 
-# Set working directory
-Set-Location $workDir
-
-# Start bot in hidden window
-$startInfo = New-Object System.Diagnostics.ProcessStartInfo
-$startInfo.FileName = $python
-$startInfo.Arguments = "-u `"$botPath`""
-$startInfo.WorkingDirectory = $workDir
-$startInfo.UseShellExecute = $false
-$startInfo.RedirectStandardOutput = "$env:TEMP\gold_mcp_bot_output.txt"
-$startInfo.RedirectStandardError = "$env:TEMP\gold_mcp_bot_output.err"
-$startInfo.CreateNoWindow = $true
-
+# Start bot in hidden window (redirect output to file)
+$logOut = "$env:TEMP\gold_mcp_bot_output.txt"
+$logErr = "$env:TEMP\gold_mcp_bot_output.err"
 try {
-    $p = [System.Diagnostics.Process]::Start($startInfo)
+    $p = Start-Process -PassThru -NoNewWindow -FilePath $python -WorkingDirectory $workDir `
+        -ArgumentList "-u", "`"$botPath`"" `
+        -RedirectStandardOutput $logOut -RedirectStandardError $logErr
     Write-Log "Bot started - PID $($p.Id)"
     Start-Sleep -Seconds 5
     if ($p.HasExited) {

@@ -112,6 +112,7 @@ class GoldMCPBot:
         self.total_pnl = 0.0
         self.trading_days = set()
         self.target_hit = False
+        self.initial_balance = None
 
         # Current SL tracker (updated by amend_sl_on_all_positions)
         # Used to compare new_sl > current_sl (only move SL up, never down)
@@ -273,7 +274,7 @@ class GoldMCPBot:
                  "tp_cooldown_until": self.tp_cooldown_until, "daily_pnl": self.daily_pnl,
                  "daily_pnl_day": self.daily_pnl_day, "last_entry_minute": self.last_entry_minute,
                  "total_pnl": self.total_pnl, "trading_days": list(self.trading_days),
-                 "target_hit": self.target_hit}
+                 "target_hit": self.target_hit, "initial_balance": self.initial_balance}
         tmp = STATE_FILE_PATH + ".tmp"
         try:
             with open(tmp, "w") as f:
@@ -305,6 +306,7 @@ class GoldMCPBot:
             self.total_pnl = state.get("total_pnl", 0.0)
             self.trading_days = set(state.get("trading_days", []))
             self.target_hit = state.get("target_hit", False)
+            self.initial_balance = state.get("initial_balance")
             if self.entries:
                 print(f"[GoldMCP] State restored: {len(self.entries)} entries, "
                       f"{'SHORT' if self.is_short else 'LONG'} @ {self.avg_price}")
@@ -373,9 +375,9 @@ class GoldMCPBot:
     async def amend_position(self, position_id, stop_loss=None, take_profit=None):
         args = {"positionId": position_id}
         if stop_loss is not None:
-            args["stopLoss"] = stop_loss
+            args["stopLoss"] = round(stop_loss, self.digits)
         if take_profit is not None:
-            args["takeProfit"] = take_profit
+            args["takeProfit"] = round(take_profit, self.digits)
         return await self.call("amend_position", args)
 
     async def close_position(self, position_id):
@@ -477,6 +479,14 @@ class GoldMCPBot:
               f"| max={MAX_ENTRIES} | SL={SL_ATR_MULT}atr | TP1={TP1_ATR_MULT}atr TP2={TP2_ATR_MULT}atr")
 
         self._load_state()
+
+        # Sync total_pnl with actual balance change since inception
+        bal_init = await self.get_balance_raw()
+        init_balance = float(bal_init.get("balance") or 0) if bal_init else 0
+        if self.initial_balance is None:
+            self.initial_balance = init_balance
+        self.total_pnl = init_balance - self.initial_balance
+        print(f"[GoldMCP] initial_balance=${self.initial_balance:.2f} total_pnl=${self.total_pnl:.2f}")
 
         # Restore cTrader positions on restart (handles Hedged mode — multiple positions per symbol)
         pos_data = await self.get_positions_raw()
@@ -737,14 +747,20 @@ class GoldMCPBot:
         if not pids:
             print(f"[GoldMCP] amend_sl: no position_ids, can't amend")
             return
+        success = True
         for pid in pids:
             try:
-                await self.amend_position(pid, stop_loss=new_sl_price)
-                print(f"[GoldMCP] Amended SL on pos {pid} to ${new_sl_price:.2f}")
+                result = await self.amend_position(pid, stop_loss=new_sl_price)
+                if result is None:
+                    print(f"[GoldMCP] amend_position returned error for {pid} — SL not updated")
+                    success = False
+                else:
+                    print(f"[GoldMCP] Amended SL on pos {pid} to ${new_sl_price:.2f}")
             except Exception as e:
                 print(f"[GoldMCP] amend_position failed for {pid}: {e}")
-        # Update current_sl tracker
-        self.current_sl = new_sl_price
+                success = False
+        if success:
+            self.current_sl = new_sl_price
 
     async def manage_position(self, price):
         if not self.has_position:
@@ -801,7 +817,10 @@ class GoldMCPBot:
             if hit:
                 half_vol = round(self.total_volume / 2, 2)
                 print(f"[GoldMCP] TP1 hit @ ${price:.2f} — closing {half_vol} lots (50%)")
-                await self.close_position_partial(0, half_vol)
+                # Close first entry's position (Hedged mode: each entry is separate position)
+                first_pid = self.entries[0].get("position_id") if self.entries else None
+                if first_pid:
+                    await self.close_position_partial(first_pid, half_vol)
                 self.closed_half = True
                 self._write_trade("TP1", self.avg_price, price, 0, len(self.entries))
                 self._save_state()
@@ -857,7 +876,10 @@ class GoldMCPBot:
             self.consecutive_tp = 0
         print(f"[GoldMCP] Closing all — {reason}")
         bal_before = await self.get_balance_raw()
-        await self.call("close_all_positions", {"symbolName": SYMBOL})
+        for e in self.entries:
+            pid = e.get("position_id")
+            if pid:
+                await self.close_position(pid)
         # Wait for cTrader to process close + balance update
         await asyncio.sleep(2)
         bal_after = await self.get_balance_raw()
