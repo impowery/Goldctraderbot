@@ -206,6 +206,7 @@ class GoldMCPRemoteBot:
 
         # SL tracker
         self.current_sl = 0.0
+        self.initial_balance = None
         self.last_scale_in_time = 0
 
         # Current balance (updated each tick from cTrader)
@@ -388,7 +389,13 @@ class GoldMCPRemoteBot:
         # Restore positions from cTrader
         await self.restore_positions()
 
-        print(f"[Remote] initial_balance=${self.daily_start_balance or 0:.2f} total_pnl=${self.total_pnl:.2f}")
+        # Sync total_pnl with balance on startup
+        bal_init = await self.get_balance_raw()
+        init_bal = bal_init.get("balance_usd", 0) if bal_init else 0
+        if self.initial_balance is None:
+            self.initial_balance = init_bal
+        self.total_pnl = init_bal - self.initial_balance
+        print(f"[Remote] initial_balance=${self.initial_balance:.2f} total_pnl=${self.total_pnl:.2f}")
 
         while True:
             try:
@@ -417,18 +424,24 @@ class GoldMCPRemoteBot:
         self.entries = []
         for p in positions:
             pid = p.get("positionId")
-            entry_price = pipettes_to_price(int(p.get("entryPrice", 0)), self.pip_digits)
+            entry_price = float(p.get("entryPrice", 0))
             vol_cents = int(p.get("volume", 0))
             vol_lots = vol_cents / (self.lot_size * 100)
-            sl_pipettes = p.get("stopLoss")
-            sl_price = pipettes_to_price(int(sl_pipettes), self.pip_digits) if sl_pipettes else 0
+            sl_raw = p.get("stopLoss")
+            sl_price = float(sl_raw) if sl_raw else 0
+            tp_raw = p.get("takeProfit")
+            tp_price = float(tp_raw) if tp_raw else 0
             self.entries.append({
                 "price": entry_price,
                 "volume_lots": vol_lots,
-                "position_id": pid
+                "position_id": pid,
+                "tp_price": tp_price,
+                "sl_price": sl_price
             })
             if sl_price > 0:
                 self.current_sl = sl_price
+            if tp_price > 0:
+                print(f"[Remote] Restored pos {pid}: entry=${entry_price:.2f} SL=${sl_price:.2f} TP=${tp_price:.2f}")
         self.is_short = positions[0].get("tradeSide", "BUY").upper() == "SELL"
         self.entry_time = int(time.time() * 1000)
         self.closed_half = False
@@ -638,33 +651,48 @@ class GoldMCPRemoteBot:
 
         # Convert absolute SL/TP prices to relative PIPETTES
         # relativeStopLoss/TakeProfit are in PIPETTES (price × 10^pip_digits)
-        # Must be rounded to step of 100 pipettes (cTrader precision requirement)
-        # Example: SL $460 below entry → 460 × 100000 = 46000000 → round to 46000000
+        # Must be rounded to step — cTrader requires different steps per symbol:
+        # XAUUSD: step 1000 pipettes, BTCUSD: step 100 pipettes
+        step = 1000 if "XAU" in SYMBOL else 100
         cur_price = self.close_prices[-1] if self.close_prices else 0
         if sl_price and cur_price:
             price_diff = abs(cur_price - sl_price)
-            sl_pipettes = int(round(price_diff * (10 ** self.pip_digits) / 100) * 100)
-            args["relativeStopLoss"] = max(sl_pipettes, 100)
+            sl_pipettes = int(round(price_diff * (10 ** self.pip_digits) / step) * step)
+            args["relativeStopLoss"] = max(sl_pipettes, step)
         if tp_price and cur_price:
             price_diff = abs(tp_price - cur_price)
-            tp_pipettes = int(round(price_diff * (10 ** self.pip_digits) / 100) * 100)
-            args["relativeTakeProfit"] = max(tp_pipettes, 100)
+            tp_pipettes = int(round(price_diff * (10 ** self.pip_digits) / step) * step)
+            args["relativeTakeProfit"] = max(tp_pipettes, step)
 
         if DRY_RUN:
             print(f"[Remote] DRY RUN — would call create_order: {json.dumps(args)}")
             return {"dry_run": True, "args": args}
 
+        print(f"[Remote] create_order args: {json.dumps(args)}")
         result = await self.call("create_order", args)
         print(f"[Remote] create_order result: {result}")
+        # Check if TP/SL were actually set
+        if isinstance(result, dict):
+            pos = result.get("position", {})
+            actual_sl = pos.get("stopLoss")
+            actual_tp = pos.get("takeProfit")
+            if actual_tp is None or actual_tp == 0:
+                print(f"[Remote] WARNING: TP not set by cTrader! Will amend manually.")
+            if actual_sl is None or actual_sl == 0:
+                print(f"[Remote] WARNING: SL not set by cTrader! Will amend manually.")
         return result
 
     async def amend_position(self, position_id, stop_loss=None, take_profit=None):
-        """Amend position SL/TP. stop_loss/take_profit are DISPLAY prices."""
+        """Amend position SL/TP. stop_loss/take_profit are DISPLAY prices.
+        cTrader allows different digits per symbol:
+        - XAUUSD: max 2 digits after decimal
+        - BTCUSD: max 3 digits after decimal"""
+        sl_tp_digits = getattr(self, 'money_digits', 2) or 2
         args = {"positionId": position_id}
         if stop_loss is not None:
-            args["stopLoss"] = round(stop_loss, self.pip_digits)
+            args["stopLoss"] = round(stop_loss, sl_tp_digits)
         if take_profit is not None:
-            args["takeProfit"] = round(take_profit, self.pip_digits)
+            args["takeProfit"] = round(take_profit, sl_tp_digits)
 
         if DRY_RUN:
             print(f"[Remote] DRY RUN — would call amend_position: {json.dumps(args)}")
@@ -844,6 +872,7 @@ class GoldMCPRemoteBot:
                  "daily_pnl_day": self.daily_pnl_day, "last_entry_minute": self.last_entry_minute,
                  "total_pnl": self.total_pnl, "trading_days": list(self.trading_days),
                  "target_hit": self.target_hit, "current_sl": self.current_sl,
+                 "initial_balance": self.initial_balance,
                  "last_scale_in_time": self.last_scale_in_time}
         tmp = STATE_FILE_PATH + ".tmp"
         try:
@@ -877,6 +906,7 @@ class GoldMCPRemoteBot:
             self.trading_days = set(state.get("trading_days", []))
             self.target_hit = state.get("target_hit", False)
             self.current_sl = state.get("current_sl", 0.0)
+            self.initial_balance = state.get("initial_balance")
             self.last_scale_in_time = state.get("last_scale_in_time", 0)
             if self.entries:
                 print(f"[Remote] State restored: {len(self.entries)} entries, "
@@ -950,12 +980,35 @@ class GoldMCPRemoteBot:
         if not pids:
             print(f"[Remote] amend_sl: no position_ids, can't amend")
             return
-        for pid in pids:
+        # Use stored TP per entry — if not stored, calculate from entry price
+        tp_offset = self.entry_atr * TP2_ATR_MULT if self.entry_atr > 0 else self.atr * TP2_ATR_MULT
+        for entry in self.entries:
+            pid = entry.get("position_id")
+            if not pid:
+                continue
+            tp_price = entry.get("tp_price", 0)
+            # If no stored TP, calculate it
+            if tp_price <= 0:
+                entry_price = entry.get("price", 0)
+                if entry_price > 0:
+                    if not self.is_short:
+                        tp_price = entry_price + tp_offset
+                    else:
+                        tp_price = entry_price - tp_offset
+                    entry["tp_price"] = tp_price  # save for next time
+                    print(f"[Remote] Calculated missing TP=${tp_price:.3f} for pos {pid}")
             try:
-                await self.amend_position(pid, stop_loss=new_sl_price)
-                print(f"[Remote] Amended SL on pos {pid} to ${new_sl_price:.2f}")
+                if tp_price > 0:
+                    result = await self.amend_position(pid, stop_loss=new_sl_price, take_profit=tp_price)
+                    if result is None:
+                        print(f"[Remote] amend_position returned error for {pid} - SL/TP not updated")
+                    else:
+                        print(f"[Remote] Amended SL=${new_sl_price:.3f} TP=${tp_price:.3f} on pos {pid}")
+                else:
+                    print(f"[Remote] WARNING: no TP for pos {pid}, skipping amend")
             except Exception as e:
                 print(f"[Remote] amend_position failed for {pid}: {e}")
+                success = False
         self.current_sl = new_sl_price
 
     # ─── Entry management ──────────────────────────────────────────
@@ -993,12 +1046,26 @@ class GoldMCPRemoteBot:
             position_id = None
             if isinstance(order, dict) and not order.get("dry_run"):
                 position_id = order.get("positionId") or order.get("position_id")
-            self.entries.append({"price": price, "volume_lots": vol, "position_id": position_id})
+            self.entries.append({"price": price, "volume_lots": vol, "position_id": position_id, "tp_price": tp_price, "sl_price": sl_price})
             self.last_entry_minute = datetime.now().minute
             print(f"[Remote] Entry #{entry_idx + 1} done | avg={self.avg_price:.2f} vol={self.total_volume:.2f} "
                   f"pos_id={position_id} SL=${sl_price:.2f} TP=${tp_price:.2f}")
             await asyncio.sleep(2)
-            # SL/TP set via relativeStopLoss/TakeProfit in create_order (pipettes)
+            # Check if TP/SL were actually set, amend if not
+            if position_id and not DRY_RUN:
+                pos = order.get("position", {}) if isinstance(order, dict) else {}
+                actual_tp = pos.get("takeProfit")
+                actual_sl = pos.get("stopLoss")
+                needs_amend = False
+                if not actual_tp or actual_tp == 0:
+                    print(f"[Remote] TP missing — will amend to ${tp_price:.3f}")
+                    needs_amend = True
+                if not actual_sl or actual_sl == 0:
+                    print(f"[Remote] SL missing — will amend to ${sl_price:.3f}")
+                    needs_amend = True
+                if needs_amend:
+                    await self.amend_position(position_id, stop_loss=sl_price, take_profit=tp_price)
+                    print(f"[Remote] Amended SL=${sl_price:.3f} TP=${tp_price:.3f} on pos {position_id}")
             # Set initial current_sl
             self.current_sl = sl_price
             print(f"[Remote] Initial SL set: ${self.current_sl:.2f}")
@@ -1045,19 +1112,20 @@ class GoldMCPRemoteBot:
                     await self.amend_sl_on_all_positions(be_sl)
                     print(f"[Remote] BREAK-EVEN: PnL {pnl_pct:.2f}% >= {BE_TRIGGER_PCT}% SL=${be_sl:.2f} (entry=${avg:.2f})")
 
-        # TP1: close 50%
+        # TP1: close first position fully (Hedged mode — each position is separate)
         tp1_price = self.get_tp1_price(price)
         if not self.closed_half:
             hit = (not self.is_short and price >= tp1_price) or (self.is_short and price <= tp1_price)
             if hit:
-                half_vol = round(self.total_volume / 2, 2)
-                print(f"[Remote] TP1 hit @ ${price:.2f} — closing {half_vol} lots (50%)")
+                print(f"[Remote] TP1 hit @ ${price:.2f} — closing first position")
                 if not DRY_RUN:
-                    # Close first position (or partial)
+                    # Close first position fully (can't close 50% across positions in Hedged mode)
                     if self.entries:
                         first_pid = self.entries[0].get("position_id")
+                        first_vol = self.entries[0].get("volume_lots", 0)
                         if first_pid:
-                            await self.close_position_partial(first_pid, half_vol)
+                            await self.close_position_partial(first_pid, first_vol)
+                            print(f"[Remote] Closed pos {first_pid} ({first_vol} lots)")
                 self.closed_half = True
                 self._write_trade("TP1", self.avg_price, price, 0, len(self.entries))
                 self._save_state()
@@ -1079,14 +1147,11 @@ class GoldMCPRemoteBot:
             if time_since_last_scale >= SCALE_IN_COOLDOWN_SEC:
                 pnl_pct = self.get_current_pnl_pct(price)
                 if pnl_pct > -0.5:
-                    can_scale = (self.is_short and price <= self.ema and price < avg) or \
-                                (not self.is_short and price >= self.ema and price > avg)
-                    if len(self.entries) == 2:
-                        if self.is_short and price >= self.entries[0]["price"]:
-                            can_scale = False
-                        if not self.is_short and price <= self.entries[0]["price"]:
-                            can_scale = False
-                    if can_scale:
+                    distance_ok = abs(price - avg) >= 0.5 * self.atr
+                    not_overextended = abs(price - self.ema) < 1.5 * self.atr
+                    can_scale = (self.is_short and price >= self.ema and price > avg) or \
+                                (not self.is_short and price <= self.ema and price < avg)
+                    if can_scale and distance_ok and not_overextended:
                         self.last_scale_in_time = now_ms
                         await self.open_entry("sell" if self.is_short else "buy", price, balance)
 

@@ -83,6 +83,11 @@ def should_enter(close: list[float], high: list[float], low: list[float]) -> tup
     if adx < ADX_THRESHOLD:
         return False, f"ADX {adx:.1f} < {ADX_THRESHOLD}"
 
+    distance = abs(price - ema) / atr if atr > 0 else 0
+    if distance > 1.5:
+        direction = "above" if price > ema else "below"
+        return False, f"Price {distance:.1f}xATR {direction} EMA ??? too far, wait for pullback"
+
     if price > ema:
         return True, f"LONG ema={ema:.1f} adx={adx:.1f} atr={atr:.2f}"
     else:
