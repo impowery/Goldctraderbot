@@ -58,6 +58,7 @@ MAX_DAILY_LOSS_PERCENT = float(os.getenv("MAX_LOSS_PERCENT", "3.0"))
 TIMEFRAME = os.getenv("TIMEFRAME", "M_5")  # Remote MCP uses M_5 not m5
 CANDLE_COUNT = int(os.getenv("CANDLE_COUNT", "100"))
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60"))
+COOLDOWN_AFTER_SL = int(os.getenv("COOLDOWN_AFTER_SL", "0"))
 RECONNECT_DELAY = int(os.getenv("RECONNECT_DELAY", "5"))
 MAX_RECONNECT_DELAY = int(os.getenv("MAX_RECONNECT_DELAY", "300"))
 
@@ -208,6 +209,7 @@ class GoldMCPRemoteBot:
         self.current_sl = 0.0
         self.initial_balance = None
         self.last_scale_in_time = 0
+        self.sl_cooldown_until = 0
 
         # Current balance (updated each tick from cTrader)
         self.current_balance = 0.0
@@ -546,6 +548,10 @@ class GoldMCPRemoteBot:
         # 6. Check cooldown / interval
         if self.tp_cooldown_until > int(time.time()):
             return
+        if self.sl_cooldown_until > int(time.time()):
+            remaining = self.sl_cooldown_until - int(time.time())
+            print(f"[Remote] SL cooldown {remaining}s remaining")
+            return
         if now - self.entry_time < MIN_INTERVAL_MINUTES * 60 * 1000 and self.entry_time > 0:
             return
 
@@ -865,6 +871,7 @@ class GoldMCPRemoteBot:
             "trading_days": list(self.trading_days),
             "target_hit": self.target_hit,
             "current_price": self.close_prices[-1] if self.close_prices else 0,
+            "sl_cooldown_until": self.sl_cooldown_until,
             "current_sl": self.current_sl,
             "ema": self.ema,
             "atr": self.atr,
@@ -895,7 +902,7 @@ class GoldMCPRemoteBot:
                  "tp_cooldown_until": self.tp_cooldown_until, "daily_pnl": self.daily_pnl,
                  "daily_pnl_day": self.daily_pnl_day, "last_entry_minute": self.last_entry_minute,
                  "total_pnl": self.total_pnl, "trading_days": list(self.trading_days),
-                 "target_hit": self.target_hit, "current_sl": self.current_sl,
+                 "target_hit": self.target_hit, "sl_cooldown_until": self.sl_cooldown_until, "current_sl": self.current_sl,
                  "initial_balance": self.initial_balance,
                  "last_scale_in_time": self.last_scale_in_time}
         tmp = STATE_FILE_PATH + ".tmp"
@@ -929,6 +936,7 @@ class GoldMCPRemoteBot:
             self.total_pnl = state.get("total_pnl", 0.0)
             self.trading_days = set(state.get("trading_days", []))
             self.target_hit = state.get("target_hit", False)
+            self.sl_cooldown_until = state.get("sl_cooldown_until", 0)
             self.current_sl = state.get("current_sl", 0.0)
             self.initial_balance = state.get("initial_balance")
             self.last_scale_in_time = state.get("last_scale_in_time", 0)
@@ -964,6 +972,9 @@ class GoldMCPRemoteBot:
                 self.total_pnl += pnl
                 self._write_trade("EXTERNAL_CLOSE", entry_price, exit_price, pnl, entries_used)
                 print(f"[Remote] External close recorded | PnL: ${pnl:+.2f} | total: ${self.total_pnl:+.2f}")
+                if pnl < 0 and COOLDOWN_AFTER_SL > 0:
+                    self.sl_cooldown_until = int(time.time()) + COOLDOWN_AFTER_SL
+                    print(f"[Remote] SL cooldown {COOLDOWN_AFTER_SL}s")
             self.entries = []
             self.closed_half = False
             self.current_sl = 0.0
@@ -1270,6 +1281,7 @@ class GoldMCPRemoteBot:
         self.current_sl = 0.0
         self.extreme_price = 0.0
         self.last_scale_in_time = 0
+        self.sl_cooldown_until = 0
         self._save_state()
 
 
