@@ -71,7 +71,7 @@ def calc_atr(high: list[float], low: list[float], close: list[float], period: in
     return calc_sma(tr_values, period)
 
 
-def should_enter(close: list[float], high: list[float], low: list[float]) -> tuple[bool, str]:
+def should_enter(close: list[float], high: list[float], low: list[float], today_high: float = 0, today_low: float = 0) -> tuple[bool, str]:
     if len(close) < 50:
         return False, "not enough data"
 
@@ -87,6 +87,14 @@ def should_enter(close: list[float], high: list[float], low: list[float]) -> tup
     if distance > 1.5:
         direction = "above" if price > ema else "below"
         return False, f"Price {distance:.1f}xATR {direction} EMA ??? too far, wait for pullback"
+
+    daily_range = today_high - today_low
+    if daily_range >= atr:
+        range_pos = (price - today_low) / daily_range
+        if price > ema and range_pos > 0.7:
+            return False, f"LONG skip at {range_pos*100:.0f}% daily range"
+        if price < ema and range_pos < 0.3:
+            return False, f"SHORT skip at {range_pos*100:.0f}% daily range"
 
     if price > ema:
         return True, f"LONG ema={ema:.1f} adx={adx:.1f} atr={atr:.2f}"

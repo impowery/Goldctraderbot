@@ -99,45 +99,43 @@ MSK = timezone(timedelta(hours=3))
 
 
 def is_market_open() -> bool:
-    """Check if XAUUSD market is open (PipFarm cTrader hours, MSK timezone).
+    """Check if market is open.
     
-    Trading hours (with safety buffer):
-    - Mon-Thu: 01:15 - 23:45 MSK
-    - Fri: 01:15 - 23:45 MSK (earlier close for safety)
-    - Sat, Sun: closed
-    
-    Note: Real market hours are 01:01-23:59, but we use 01:15-23:45
-    to avoid edge cases near session breaks.
+    BTCUSD: 24/7 (crypto never sleeps)
+    XAUUSD: Mon-Thu 01:15-23:45, Fri 01:15-23:45, Sat-Sun closed (MSK)
     """
+    # BTC trades 24/7 — always open
+    if "BTC" in SYMBOL:
+        return True
+    
+    # XAUUSD — market hours
     now = datetime.now(MSK)
     weekday = now.weekday()  # 0=Mon, 6=Sun
     
-    # Saturday (5) or Sunday (6) — closed
     if weekday == 5 or weekday == 6:
         return False
     
-    # Mon-Fri: check time
     hour_min = now.hour * 60 + now.minute
-    open_min = 1 * 60 + 15    # 01:15 = 75 minutes
-    close_min = 23 * 60 + 45  # 23:45 = 1425 minutes (same for all weekdays)
+    open_min = 1 * 60 + 15    # 01:15
+    close_min = 23 * 60 + 45  # 23:45
     
     return open_min <= hour_min <= close_min
 
 
 def market_status_str() -> str:
     """Return human-readable market status."""
+    if "BTC" in SYMBOL:
+        return "OPEN (24/7 crypto)"
+    
     now = datetime.now(MSK)
     weekday = now.weekday()
     days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     if not is_market_open():
-        if weekday == 5:  # Saturday
+        if weekday == 5 or weekday == 6:
             return f"CLOSED (weekend, opens Mon 01:15 MSK)"
-        elif weekday == 6:  # Sunday
-            return f"CLOSED (weekend, opens Mon 01:15 MSK)"
-        elif weekday == 4 and now.hour >= 23:  # Friday after close
+        elif weekday == 4 and now.hour >= 23:
             return f"CLOSED (weekend, opens Mon 01:15 MSK)"
         else:
-            # Weekday night pause (23:45 - 01:15)
             return f"CLOSED (night pause, opens 01:15 MSK)"
     return f"OPEN ({days[weekday]} {now.strftime('%H:%M')} MSK)"
 
@@ -198,6 +196,8 @@ class GoldMCPRemoteBot:
         self.adx = 0.0
         self.ema = 0.0
         self.last_candle_fetch = 0
+        self.today_high = 0.0
+        self.today_low = 0.0
 
         # Challenge tracking
         self.total_pnl = 0.0
@@ -550,7 +550,7 @@ class GoldMCPRemoteBot:
             return
 
         # 7. Strategy signal
-        enter, reason = should_enter(self.close_prices, self.high_prices, self.low_prices)
+        enter, reason = should_enter(self.close_prices, self.high_prices, self.low_prices, today_high=self.today_high, today_low=self.today_low)
         if not enter:
             return
         if self.adx > 0 and self.adx < 20:
@@ -609,7 +609,7 @@ class GoldMCPRemoteBot:
         Remote MCP docs: {fromTimestamp, toTimestamp} for ≤720h range query.
         """
         now = datetime.now(timezone.utc)
-        # 100 M5 candles = 500 minutes ≈ 8.3 hours
+        # 100 M5 candles ≈ 8.3 hours (API max), covers most of current trading session
         from_dt = now - timedelta(hours=10)
         from_iso = from_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         to_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -626,11 +626,35 @@ class GoldMCPRemoteBot:
         if len(bars) < 50:
             print(f"[Remote] fetch_candles: only {len(bars)} bars")
             return
-        # Parse pipettes → display prices
-        self.close_prices = [pipettes_to_price(int(b.get("close", b.get("c", 0))), self.pip_digits) for b in bars]
-        self.high_prices = [pipettes_to_price(int(b.get("high", b.get("h", 0))), self.pip_digits) for b in bars]
-        self.low_prices = [pipettes_to_price(int(b.get("low", b.get("l", 0))), self.pip_digits) for b in bars]
-        print(f"[Remote] Fetched {len(bars)} candles | last close=${self.close_prices[-1]:.2f}")
+        today_str = datetime.now(MSK).strftime("%Y-%m-%d")
+        tl = float('inf')
+        th = float('-inf')
+        self.close_prices = []
+        self.high_prices = []
+        self.low_prices = []
+        for b in bars:
+            close = pipettes_to_price(int(b.get("close", b.get("c", 0))), self.pip_digits)
+            high = pipettes_to_price(int(b.get("high", b.get("h", 0))), self.pip_digits)
+            low = pipettes_to_price(int(b.get("low", b.get("l", 0))), self.pip_digits)
+            self.close_prices.append(close)
+            self.high_prices.append(high)
+            self.low_prices.append(low)
+            ts_raw = b.get("utcBeginInMinutes") or b.get("timestamp") or b.get("t")
+            if ts_raw is not None:
+                if isinstance(ts_raw, (int, float)):
+                    if ts_raw > 1e12:
+                        ts_sec = ts_raw / 1000
+                    elif ts_raw > 1e10:
+                        ts_sec = ts_raw
+                    else:
+                        ts_sec = ts_raw * 60
+                    candle_dt = datetime.fromtimestamp(ts_sec, tz=MSK)
+                    if candle_dt.strftime("%Y-%m-%d") == today_str:
+                        tl = min(tl, low)
+                        th = max(th, high)
+        self.today_low = tl if tl != float('inf') else 0
+        self.today_high = th if th != float('-inf') else 0
+        print(f"[Remote] Fetched {len(bars)} candles | last close=${self.close_prices[-1]:.2f} | today range=${self.today_low:.2f}-${self.today_high:.2f}")
 
     async def place_market_order(self, side, volume_lots, sl_price=None, tp_price=None):
         """Place MARKET order. volume_lots → cents. SL/TP as relative points.
