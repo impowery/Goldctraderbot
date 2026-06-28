@@ -210,6 +210,7 @@ class GoldMCPRemoteBot:
         self.initial_balance = None
         self.last_scale_in_time = 0
         self.sl_cooldown_until = 0
+        self.consecutive_losses = 0
 
         # Current balance (updated each tick from cTrader)
         self.current_balance = 0.0
@@ -872,6 +873,7 @@ class GoldMCPRemoteBot:
             "target_hit": self.target_hit,
             "current_price": self.close_prices[-1] if self.close_prices else 0,
             "sl_cooldown_until": self.sl_cooldown_until,
+            "consecutive_losses": self.consecutive_losses,
             "current_sl": self.current_sl,
             "ema": self.ema,
             "atr": self.atr,
@@ -902,7 +904,7 @@ class GoldMCPRemoteBot:
                  "tp_cooldown_until": self.tp_cooldown_until, "daily_pnl": self.daily_pnl,
                  "daily_pnl_day": self.daily_pnl_day, "last_entry_minute": self.last_entry_minute,
                  "total_pnl": self.total_pnl, "trading_days": list(self.trading_days),
-                 "target_hit": self.target_hit, "sl_cooldown_until": self.sl_cooldown_until, "current_sl": self.current_sl,
+                 "target_hit": self.target_hit, "sl_cooldown_until": self.sl_cooldown_until, "consecutive_losses": self.consecutive_losses, "current_sl": self.current_sl,
                  "initial_balance": self.initial_balance,
                  "last_scale_in_time": self.last_scale_in_time}
         tmp = STATE_FILE_PATH + ".tmp"
@@ -937,6 +939,7 @@ class GoldMCPRemoteBot:
             self.trading_days = set(state.get("trading_days", []))
             self.target_hit = state.get("target_hit", False)
             self.sl_cooldown_until = state.get("sl_cooldown_until", 0)
+            self.consecutive_losses = state.get("consecutive_losses", 0)
             self.current_sl = state.get("current_sl", 0.0)
             self.initial_balance = state.get("initial_balance")
             self.last_scale_in_time = state.get("last_scale_in_time", 0)
@@ -973,8 +976,12 @@ class GoldMCPRemoteBot:
                 self._write_trade("EXTERNAL_CLOSE", entry_price, exit_price, pnl, entries_used)
                 print(f"[Remote] External close recorded | PnL: ${pnl:+.2f} | total: ${self.total_pnl:+.2f}")
                 if pnl < 0 and COOLDOWN_AFTER_SL > 0:
-                    self.sl_cooldown_until = int(time.time()) + COOLDOWN_AFTER_SL
-                    print(f"[Remote] SL cooldown {COOLDOWN_AFTER_SL}s")
+                    self.consecutive_losses = getattr(self, 'consecutive_losses', 0) + 1
+                    cooldown = min(COOLDOWN_AFTER_SL * (2 ** (self.consecutive_losses - 1)), 7200)
+                    self.sl_cooldown_until = int(time.time()) + cooldown
+                    print(f"[Remote] SL cooldown {cooldown}s (consecutive loss #{self.consecutive_losses})")
+                elif pnl >= 0:
+                    self.consecutive_losses = 0
             self.entries = []
             self.closed_half = False
             self.current_sl = 0.0
@@ -1267,11 +1274,19 @@ class GoldMCPRemoteBot:
             await asyncio.sleep(2)
         bal_after = await self.get_balance_raw()
         exit_price = self.close_prices[-1] if self.close_prices else 0
+        # Calculate PnL from entry/exit prices (reliable, not dependent on balance update delay)
         pnl = 0.0
-        if bal_before and bal_after:
+        if entry_price > 0 and exit_price > 0:
+            for e in self.entries:
+                e_price = e.get("price", 0)
+                e_vol = e.get("volume_lots", 0)
+                if self.is_short:
+                    pnl += (e_price - exit_price) * e_vol * self.lot_size
+                else:
+                    pnl += (exit_price - e_price) * e_vol * self.lot_size
+        # Fallback to balance delta if price calc failed
+        if pnl == 0.0 and bal_before and bal_after:
             pnl = bal_after.get("balance", 0) - bal_before.get("balance", 0)
-        elif bal_after:
-            pnl = bal_after.get("balance", 0) - (self.daily_start_balance or 0) - self.total_pnl
         if entry_price > 0:
             self.total_pnl += pnl
             self._write_trade(reason, entry_price, exit_price, pnl, entries_used)
@@ -1281,7 +1296,14 @@ class GoldMCPRemoteBot:
         self.current_sl = 0.0
         self.extreme_price = 0.0
         self.last_scale_in_time = 0
-        self.sl_cooldown_until = 0
+        # SL cooldown: trigger on negative PnL, with escalation for consecutive losses
+        if pnl < 0 and COOLDOWN_AFTER_SL > 0:
+            self.consecutive_losses = getattr(self, 'consecutive_losses', 0) + 1
+            cooldown = min(COOLDOWN_AFTER_SL * (2 ** (self.consecutive_losses - 1)), 7200)  # 30m → 60m → 120m, max 2h
+            self.sl_cooldown_until = int(time.time()) + cooldown
+            print(f"[Remote] SL cooldown {cooldown}s (consecutive loss #{self.consecutive_losses})")
+        elif pnl >= 0:
+            self.consecutive_losses = 0
         self._save_state()
 
 
