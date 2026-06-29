@@ -71,6 +71,8 @@ TRAIL_ACTIVATE_PCT = float(os.getenv("TRAIL_ACTIVATE_PCT", "0.5"))
 TIME_EXIT_HOURS = float(os.getenv("TIME_EXIT_HOURS", "4"))
 BE_TRIGGER_PCT = float(os.getenv("BE_TRIGGER_PCT", "0.5"))
 BE_OFFSET_ATR = float(os.getenv("BE_OFFSET_ATR", "0.0"))
+# Scale-in cooldown (seconds) between consecutive entries. Default 300s = 5 min.
+SCALE_IN_COOLDOWN_SEC = int(os.getenv("SCALE_IN_COOLDOWN_SEC", "300"))
 
 # === Dry run mode ===
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
@@ -385,7 +387,7 @@ class GoldMCPRemoteBot:
 
         print(f"[Remote] Bot | {SYMBOL} | entries={ENTRY_VOLUMES} lots "
               f"| max={MAX_ENTRIES} | SL={SL_ATR_MULT}atr | TP1={TP1_ATR_MULT}atr TP2={TP2_ATR_MULT}atr")
-        print(f"[Remote] BE trigger={BE_TRIGGER_PCT}% | Time exit={TIME_EXIT_HOURS}h | Scale-in cooldown=5min")
+        print(f"[Remote] BE trigger={BE_TRIGGER_PCT}% | Time exit={TIME_EXIT_HOURS}h | Scale-in cooldown={SCALE_IN_COOLDOWN_SEC}s")
 
         self._load_state()
 
@@ -1063,6 +1065,10 @@ class GoldMCPRemoteBot:
     # ─── Entry management ──────────────────────────────────────────
 
     async def open_entry(self, side, price, balance):
+        # Always update last_scale_in_time on ANY entry (first or scale-in)
+        # to enforce cooldown before the next entry. Previously only set on scale-in,
+        # which allowed an immediate 2nd entry within seconds of the 1st (cooldown bypass).
+        self.last_scale_in_time = int(time.time() * 1000)
         if not self.entries:
             self.is_short = side == "sell"
             self.entry_time = int(time.time() * 1000)
@@ -1235,10 +1241,16 @@ class GoldMCPRemoteBot:
             return
 
         # Scale-in with cooldown
-        SCALE_IN_COOLDOWN_SEC = 300
+        # Use configurable SCALE_IN_COOLDOWN_SEC (loaded from .env, default 300s = 5 min)
         if len(self.entries) < MAX_ENTRIES and not self.closed_half:
             now_ms = int(time.time() * 1000)
-            time_since_last_scale = (now_ms - self.last_scale_in_time) / 1000 if self.last_scale_in_time > 0 else 999
+            if self.last_scale_in_time > 0:
+                time_since_last_scale = (now_ms - self.last_scale_in_time) / 1000
+            else:
+                # No previous entry recorded — block scale-in until at least one full cooldown
+                # has elapsed since entry_time. Fixes the old bug where last_scale_in_time=0
+                # made time_since_last_scale=999 and bypassed cooldown entirely.
+                time_since_last_scale = (now_ms - self.entry_time) / 1000 if self.entry_time > 0 else 0
             if time_since_last_scale >= SCALE_IN_COOLDOWN_SEC:
                 pnl_pct = self.get_current_pnl_pct(price)
                 if pnl_pct > -0.5:
@@ -1247,7 +1259,6 @@ class GoldMCPRemoteBot:
                     can_scale = (self.is_short and price >= self.ema and price > avg) or \
                                 (not self.is_short and price <= self.ema and price < avg)
                     if can_scale and distance_ok and not_overextended:
-                        self.last_scale_in_time = now_ms
                         await self.open_entry("sell" if self.is_short else "buy", price, balance)
 
         # Time exit — skip for last entry (ride the trend)
