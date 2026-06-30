@@ -719,7 +719,8 @@ class GoldMCPRemoteBot:
         """Amend position SL/TP. stop_loss/take_profit are DISPLAY prices.
         cTrader allows different digits per symbol:
         - XAUUSD: max 2 digits after decimal
-        - BTCUSD: max 3 digits after decimal"""
+        - BTCUSD: max 3 digits after decimal
+        If position returns 404 (closed externally), removes it from self.entries."""
         sl_tp_digits = getattr(self, 'money_digits', 2) or 2
         args = {"positionId": position_id}
         if stop_loss is not None:
@@ -731,10 +732,15 @@ class GoldMCPRemoteBot:
             print(f"[Remote] DRY RUN — would call amend_position: {json.dumps(args)}")
             return {"dry_run": True}
 
-        return await self.call("amend_position", args)
+        result = await self.call("amend_position", args)
+        if result is None:
+            # Amend failed — verify if position was closed externally (404)
+            await self._remove_stale_position(position_id)
+        return result
 
     async def close_position(self, position_id, volume_cents=None):
-        """Close position (full or partial by volume)."""
+        """Close position (full or partial by volume).
+        If position returns 404 (already closed externally), removes it from self.entries."""
         args = {"positionId": position_id}
         if volume_cents is not None:
             args["volume"] = volume_cents
@@ -743,7 +749,44 @@ class GoldMCPRemoteBot:
             print(f"[Remote] DRY RUN — would call close_position: {json.dumps(args)}")
             return {"dry_run": True}
 
-        return await self.call("close_position", args)
+        result = await self.call("close_position", args)
+        if result is None:
+            # Close failed — verify if position was already closed externally (404)
+            await self._remove_stale_position(position_id)
+        return result
+
+    async def _remove_stale_position(self, position_id):
+        """Check if position_id still exists in cTrader. If not, remove from self.entries.
+        This handles the case where a position was closed externally (by broker TP/SL)
+        but bot state still references it. Without this, bot would keep trying to amend
+        closed positions, generating 404 errors every tick."""
+        if not position_id:
+            return
+        try:
+            pos_data = await self.get_positions_raw()
+            if not pos_data:
+                # Can't verify (network error?) — leave state as is, will retry next tick
+                return
+            ctrader_positions = [p for p in pos_data.get("positions", [])
+                                 if p.get("symbolId") == self.symbol_id]
+            live_pids = {p.get("positionId") for p in ctrader_positions}
+            if position_id not in live_pids:
+                # Position was closed externally — remove from state
+                old_len = len(self.entries)
+                self.entries = [e for e in self.entries if e.get("position_id") != position_id]
+                if len(self.entries) < old_len:
+                    print(f"[Remote] Position {position_id} not in cTrader — removed from state "
+                          f"({len(self.entries)} entries left)")
+                    if not self.entries:
+                        # All positions closed — reset position state
+                        self.closed_half = False
+                        self.current_sl = 0.0
+                        self.extreme_price = 0.0
+                        self.last_scale_in_time = 0
+                        print(f"[Remote] No entries left — position state reset")
+                    self._save_state()
+        except Exception as e:
+            print(f"[Remote] _remove_stale_position check failed for {position_id}: {e}")
 
     async def close_position_partial(self, position_id, volume_lots):
         """Close partial position. volume_lots → cents."""
