@@ -413,6 +413,7 @@ systemctl restart gold-remote
 | 28 | Last entry получал TP через amend (regression бага #19/#23) — `needs_amend=True` стоял после elif на неправильном отступе, срабатывал всегда; 3-я позиция закрывалась по TP вместо trailing SL | Убран лишний `needs_amend=True`, в amend передаётся `take_profit=None` для last entry |
 | 29 | `amend_position`/`close_position` на закрытые позиции генерировали 404 каждую минуту (83 ошибки) | `_remove_stale_position()` — убирает position_id из state когда cTrader возвращает 404 |
 | 30 | Scale-in срабатывал на шумовом колебании (0.5×ATR ≈ $2.5) — 3 входа за 17 мин на движении $9, avg price слишком близко к 1-й цене | `SCALE_IN_DISTANCE_MULT=1.0` в `.env` (была 0.5) — нужен реальный откат ≥ 1×ATR |
+| 31 | **Trailing SL и BE применялись ко всем позициям одновременно (одна цена SL для всех)** — 3 LONG со SL в одной точке $4022, маркетмейкеры зацепили кластер на лою отката $4021, -$1,527 убытка | Per-entry trailing SL + BE: каждая позиция имеет свой `extreme_price` и `sl_price`, SL считается от entry_price каждой позиции. Сегодня SL были бы $4018/$4010/$4008 — лой $4021 не задел бы ни один |
 
 ---
 
