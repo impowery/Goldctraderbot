@@ -73,6 +73,9 @@ BE_TRIGGER_PCT = float(os.getenv("BE_TRIGGER_PCT", "0.5"))
 BE_OFFSET_ATR = float(os.getenv("BE_OFFSET_ATR", "0.0"))
 # Scale-in cooldown (seconds) between consecutive entries. Default 300s = 5 min.
 SCALE_IN_COOLDOWN_SEC = int(os.getenv("SCALE_IN_COOLDOWN_SEC", "300"))
+# Scale-in distance filter: how far price must pull back from avg before adding entry.
+# Default 1.0 × ATR (was 0.5, which was too loose — bot added entries on noise, not real pullbacks).
+SCALE_IN_DISTANCE_MULT = float(os.getenv("SCALE_IN_DISTANCE_MULT", "1.0"))
 
 # === Dry run mode ===
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
@@ -387,7 +390,7 @@ class GoldMCPRemoteBot:
 
         print(f"[Remote] Bot | {SYMBOL} | entries={ENTRY_VOLUMES} lots "
               f"| max={MAX_ENTRIES} | SL={SL_ATR_MULT}atr | TP1={TP1_ATR_MULT}atr TP2={TP2_ATR_MULT}atr")
-        print(f"[Remote] BE trigger={BE_TRIGGER_PCT}% | Time exit={TIME_EXIT_HOURS}h | Scale-in cooldown={SCALE_IN_COOLDOWN_SEC}s")
+        print(f"[Remote] BE trigger={BE_TRIGGER_PCT}% | Time exit={TIME_EXIT_HOURS}h | Scale-in cooldown={SCALE_IN_COOLDOWN_SEC}s | Scale-in distance={SCALE_IN_DISTANCE_MULT}xATR")
 
         self._load_state()
 
@@ -1301,7 +1304,7 @@ class GoldMCPRemoteBot:
             if time_since_last_scale >= SCALE_IN_COOLDOWN_SEC:
                 pnl_pct = self.get_current_pnl_pct(price)
                 if pnl_pct > -0.5:
-                    distance_ok = abs(price - avg) >= 0.5 * self.atr
+                    distance_ok = abs(price - avg) >= SCALE_IN_DISTANCE_MULT * self.atr
                     not_overextended = abs(price - self.ema) < 1.5 * self.atr
                     can_scale = (self.is_short and price >= self.ema and price > avg) or \
                                 (not self.is_short and price <= self.ema and price < avg)
