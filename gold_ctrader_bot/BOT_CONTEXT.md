@@ -148,6 +148,7 @@ tail -f /root/bots/logs/gold_remote.log   # лог из файла
 | BE_TRIGGER_PCT | 0.2 | 0.5 | break-even trigger (% PnL) |
 | TIME_EXIT_HOURS | 4 | 4 | exit if \|PnL\| < 1% |
 | SCALE_IN_COOLDOWN_SEC | 300 | — | между входами |
+| SCALE_IN_DISTANCE_MULT | 1.0 | — | min откат от avg для scale-in (×ATR) |
 | COOLDOWN_AFTER_SL | 1800 | 1800 | cooldown после SL (с эскалацией) |
 | ADX_THRESHOLD | 25 (hardcoded) | 22 | минимальный ADX для входа |
 
@@ -156,7 +157,7 @@ tail -f /root/bots/logs/gold_remote.log   # лог из файла
 if len(entries) < MAX_ENTRIES:
    if time_since_last_scale >= SCALE_IN_COOLDOWN_SEC:
       if pnl_pct > -0.5:                          # не усреднять большой убыток
-         if distance_ok = abs(price-avg) >= 0.5*ATR:    # не слишком близко
+         if distance_ok = abs(price-avg) >= SCALE_IN_DISTANCE_MULT*ATR:  # реальный откат
             if not_overextended = abs(price-ema) < 1.5*ATR:  # не слишком далеко
                if can_scale = pullback к EMA:
                   open_entry()
@@ -411,6 +412,7 @@ systemctl restart gold-remote
 | 27 | `cp` в cron затирал свежие trades устаревшим файлом | Убран `&& cp` |
 | 28 | Last entry получал TP через amend (regression бага #19/#23) — `needs_amend=True` стоял после elif на неправильном отступе, срабатывал всегда; 3-я позиция закрывалась по TP вместо trailing SL | Убран лишний `needs_amend=True`, в amend передаётся `take_profit=None` для last entry |
 | 29 | `amend_position`/`close_position` на закрытые позиции генерировали 404 каждую минуту (83 ошибки) | `_remove_stale_position()` — убирает position_id из state когда cTrader возвращает 404 |
+| 30 | Scale-in срабатывал на шумовом колебании (0.5×ATR ≈ $2.5) — 3 входа за 17 мин на движении $9, avg price слишком близко к 1-й цене | `SCALE_IN_DISTANCE_MULT=1.0` в `.env` (была 0.5) — нужен реальный откат ≥ 1×ATR |
 
 ---
 
