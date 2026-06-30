@@ -1172,14 +1172,18 @@ class GoldMCPRemoteBot:
                         print(f"[Remote] TP missing ??? will amend to ${tp_price:.3f}")
                         needs_amend = True
                     elif is_last_entry and (not actual_tp or actual_tp == 0):
+                        # Last entry should NOT have TP — ride trend with trailing SL only.
+                        # Do NOT set needs_amend here (was a bug: TP was being added to last entry).
                         print(f"[Remote] Last entry ??? TP skipped intentionally, trailing SL only")
-                    needs_amend = True
                 if not actual_sl or actual_sl == 0:
                     print(f"[Remote] SL missing — will amend to ${sl_price:.3f}")
                     needs_amend = True
                 if needs_amend:
-                    await self.amend_position(position_id, stop_loss=sl_price, take_profit=tp_price)
-                    print(f"[Remote] Amended SL=${sl_price:.3f} TP=${tp_price:.3f} on pos {position_id}")
+                    # For last entry, pass take_profit=None so cTrader does NOT add TP
+                    amend_tp = tp_price if not is_last_entry else None
+                    await self.amend_position(position_id, stop_loss=sl_price, take_profit=amend_tp)
+                    tp_log = f"${tp_price:.3f}" if not is_last_entry else "NONE (ride trend)"
+                    print(f"[Remote] Amended SL=${sl_price:.3f} TP={tp_log} on pos {position_id}")
             # Set initial current_sl ??? only if higher (LONG) or lower (SHORT) than existing
             if not self.entries or len(self.entries) <= 1:
                 self.current_sl = sl_price
