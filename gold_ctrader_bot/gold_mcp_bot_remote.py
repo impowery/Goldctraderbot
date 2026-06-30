@@ -444,7 +444,9 @@ class GoldMCPRemoteBot:
                 "volume_lots": vol_lots,
                 "position_id": pid,
                 "tp_price": tp_price,
-                "sl_price": sl_price
+                "sl_price": sl_price,
+                "extreme_price": entry_price,  # init per-entry extreme for independent trailing SL
+                "be_triggered": False
             })
             if sl_price > 0:
                 self.current_sl = sl_price
@@ -1062,6 +1064,8 @@ class GoldMCPRemoteBot:
         return ids
 
     async def amend_sl_on_all_positions(self, new_sl_price: float):
+        """Legacy: amend SL to one price for all positions. Kept for backward compat.
+        New code should use amend_sl_per_position() instead — gives each entry its own SL."""
         if DRY_RUN:
             print(f"[Remote] DRY RUN — would amend SL to ${new_sl_price:.2f} on all positions")
             self.current_sl = new_sl_price
@@ -1107,6 +1111,61 @@ class GoldMCPRemoteBot:
                 print(f"[Remote] amend_position failed for {pid}: {e}")
                 success = False
         self.current_sl = new_sl_price
+
+    async def amend_sl_per_position(self, sl_per_entry: dict):
+        """Amend SL independently for each entry. sl_per_entry = {position_id: sl_price}.
+        Each entry has its own extreme_price and SL — prevents all stops from clustering
+        at one level (which is what market makers target)."""
+        if DRY_RUN:
+            print(f"[Remote] DRY RUN — would amend SL per position: {sl_per_entry}")
+            return
+        # Use stored TP per entry
+        tp_offset = self.entry_atr * TP2_ATR_MULT if self.entry_atr > 0 else self.atr * TP2_ATR_MULT
+        max_iter = len(self.entries)
+        for i, entry in enumerate(self.entries):
+            pid = entry.get("position_id")
+            if not pid:
+                continue
+            new_sl = sl_per_entry.get(pid)
+            if new_sl is None:
+                continue
+            # Update stored sl_price in entry
+            entry["sl_price"] = new_sl
+            tp_price = entry.get("tp_price", 0)
+            is_last = (i == max_iter - 1)
+            # If no stored TP, calculate it (skip for last entry — rides trend)
+            if tp_price <= 0 and not is_last:
+                entry_price = entry.get("price", 0)
+                if entry_price > 0:
+                    if not self.is_short:
+                        tp_price = entry_price + tp_offset
+                    else:
+                        tp_price = entry_price - tp_offset
+                    entry["tp_price"] = tp_price
+                    print(f"[Remote] Calculated missing TP=${tp_price:.3f} for pos {pid}")
+            if is_last and tp_price <= 0:
+                print(f"[Remote] Last entry (pos {pid}) — no TP, riding trend")
+            try:
+                if tp_price > 0:
+                    result = await self.amend_position(pid, stop_loss=new_sl, take_profit=tp_price)
+                    if result is None:
+                        print(f"[Remote] amend_position returned error for {pid} - SL/TP not updated")
+                    else:
+                        print(f"[Remote] Amended SL=${new_sl:.3f} TP=${tp_price:.3f} on pos {pid}")
+                else:
+                    result = await self.amend_position(pid, stop_loss=new_sl, take_profit=None)
+                    if result is None:
+                        print(f"[Remote] amend_position returned error for {pid} - SL not updated")
+                    else:
+                        print(f"[Remote] Amended SL=${new_sl:.3f} (no TP — ride trend) on pos {pid}")
+            except Exception as e:
+                print(f"[Remote] amend_position failed for {pid}: {e}")
+        # Update current_sl to the TIGHTEST SL across all entries (for tracking)
+        if sl_per_entry.values():
+            if not self.is_short:
+                self.current_sl = max(sl_per_entry.values())  # LONG: highest SL = tightest
+            else:
+                self.current_sl = min(sl_per_entry.values())  # SHORT: lowest SL = tightest
 
     # ─── Entry management ──────────────────────────────────────────
 
@@ -1158,7 +1217,11 @@ class GoldMCPRemoteBot:
                 position_id = order.get("positionId") or order.get("position_id")
             # Store tp_price=0 for last entry (no TP, rides trend)
             stored_tp = tp_price if not is_last_entry else 0
-            self.entries.append({"price": price, "volume_lots": vol, "position_id": position_id, "tp_price": stored_tp, "sl_price": sl_price})
+            # Each entry has its OWN extreme_price (init = entry price) for independent trailing SL.
+            # This prevents all stops from clustering at one level (market-maker stop-hunt target).
+            self.entries.append({"price": price, "volume_lots": vol, "position_id": position_id,
+                                 "tp_price": stored_tp, "sl_price": sl_price,
+                                 "extreme_price": price, "be_triggered": False})
             self.last_entry_minute = datetime.now().minute
             tp_str = f"${tp_price:.2f}" if not is_last_entry else "NONE (ride trend)"
             print(f"[Remote] Entry #{entry_idx + 1} done | avg={self.avg_price:.2f} vol={self.total_volume:.2f} "
@@ -1210,35 +1273,75 @@ class GoldMCPRemoteBot:
         if not all(e.get("position_id") for e in self.entries) and not DRY_RUN:
             await self.sync_position_ids()
 
-        # Trailing SL
-        if not self.is_short:
-            if price > self.extreme_price:
-                self.extreme_price = price
-                td = self.atr * SL_ATR_MULT
-                new_sl = self.extreme_price - td
-                if self.current_sl == 0 or new_sl > self.current_sl:
-                    await self.amend_sl_on_all_positions(new_sl)
-        else:
-            if price < self.extreme_price:
-                self.extreme_price = price
-                td = self.atr * SL_ATR_MULT
-                new_sl = self.extreme_price + td
-                if self.current_sl == 0 or new_sl < self.current_sl:
-                    await self.amend_sl_on_all_positions(new_sl)
+        # ─── Per-entry Trailing SL + Break-even ───────────────────────────
+        # Each entry has its OWN extreme_price and sl_price, so stops don't cluster.
+        # Loop over all entries, compute new SL per entry, batch amend once.
+        sl_updates = {}  # {position_id: new_sl_price}
+        atr_for_sl = self.atr if self.atr > 0 else (self.entry_atr if self.entry_atr > 0 else 5)
+        td = atr_for_sl * SL_ATR_MULT
+        be_offset = atr_for_sl * BE_OFFSET_ATR
 
-        # Break-even
-        pnl_pct = self.get_current_pnl_pct(price)
-        if pnl_pct >= BE_TRIGGER_PCT:
+        for entry in self.entries:
+            pid = entry.get("position_id")
+            if not pid:
+                continue
+            entry_price = entry.get("price", 0)
+            if entry_price <= 0:
+                continue
+            # Init extreme_price if missing (backward compat with old state)
+            if entry.get("extreme_price", 0) == 0:
+                entry["extreme_price"] = entry_price
+            extreme = entry["extreme_price"]
+            cur_sl = entry.get("sl_price", 0)
+            be_done = entry.get("be_triggered", False)
+
+            # Trailing SL: update extreme_price if price made new high (LONG) / low (SHORT)
             if not self.is_short:
-                be_sl = avg + self.atr * BE_OFFSET_ATR
-                if self.current_sl == 0 or be_sl > self.current_sl:
-                    await self.amend_sl_on_all_positions(be_sl)
-                    print(f"[Remote] BREAK-EVEN: PnL {pnl_pct:.2f}% >= {BE_TRIGGER_PCT}% SL=${be_sl:.2f} (entry=${avg:.2f})")
+                if price > extreme:
+                    entry["extreme_price"] = price
+                    extreme = price
+                new_sl = extreme - td
+                # Only move SL UP for LONG (tighter); skip if no improvement
+                if cur_sl == 0 or new_sl > cur_sl:
+                    sl_updates[pid] = new_sl
             else:
-                be_sl = avg - self.atr * BE_OFFSET_ATR
-                if self.current_sl == 0 or be_sl < self.current_sl:
-                    await self.amend_sl_on_all_positions(be_sl)
-                    print(f"[Remote] BREAK-EVEN: PnL {pnl_pct:.2f}% >= {BE_TRIGGER_PCT}% SL=${be_sl:.2f} (entry=${avg:.2f})")
+                if price < extreme:
+                    entry["extreme_price"] = price
+                    extreme = price
+                new_sl = extreme + td
+                # Only move SL DOWN for SHORT (tighter); skip if no improvement
+                if cur_sl == 0 or new_sl < cur_sl:
+                    sl_updates[pid] = new_sl
+
+            # Break-even: per entry, when THIS entry's PnL >= BE_TRIGGER_PCT
+            if not be_done:
+                if not self.is_short:
+                    entry_pnl_pct = (price - entry_price) / entry_price * 100
+                else:
+                    entry_pnl_pct = (entry_price - price) / entry_price * 100
+                if entry_pnl_pct >= BE_TRIGGER_PCT:
+                    if not self.is_short:
+                        be_sl = entry_price + be_offset
+                    else:
+                        be_sl = entry_price - be_offset
+                    # BE overrides trailing if tighter
+                    current_target = sl_updates.get(pid, cur_sl)
+                    if not self.is_short:
+                        if current_target == 0 or be_sl > current_target:
+                            sl_updates[pid] = be_sl
+                    else:
+                        if current_target == 0 or be_sl < current_target:
+                            sl_updates[pid] = be_sl
+                    entry["be_triggered"] = True
+                    print(f"[Remote] BREAK-EVEN pos {pid}: entry=${entry_price:.2f} "
+                          f"PnL={entry_pnl_pct:.2f}% >= {BE_TRIGGER_PCT}% SL=${be_sl:.2f}")
+
+        # Batch amend SL for all entries that need update
+        if sl_updates:
+            await self.amend_sl_per_position(sl_updates)
+
+        # Aggregate PnL% (for time exit)
+        pnl_pct = self.get_current_pnl_pct(price)
 
         # TP1: close first position fully (Hedged mode — each position is separate)
         tp1_price = self.get_tp1_price(price)
