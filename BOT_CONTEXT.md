@@ -409,6 +409,8 @@ systemctl restart gold-remote
 | 25 | `last_scale_in_time=0` обходил cooldown | Update на каждый entry + fallback to entry_time |
 | 26 | `SCALE_IN_COOLDOWN_SEC` был hardcoded | Вынесен в `.env` |
 | 27 | `cp` в cron затирал свежие trades устаревшим файлом | Убран `&& cp` |
+| 28 | Last entry получал TP через amend (regression бага #19/#23) — `needs_amend=True` стоял после elif на неправильном отступе, срабатывал всегда; 3-я позиция закрывалась по TP вместо trailing SL | Убран лишний `needs_amend=True`, в amend передаётся `take_profit=None` для last entry |
+| 29 | `amend_position`/`close_position` на закрытые позиции генерировали 404 каждую минуту (83 ошибки) | `_remove_stale_position()` — убирает position_id из state когда cTrader возвращает 404 |
 
 ---
 
