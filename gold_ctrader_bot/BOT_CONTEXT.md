@@ -144,8 +144,8 @@ tail -f /root/bots/logs/gold_remote.log   # лог из файла
 | ENTRY_VOLUMES | 0.3,0.3,0.3 | 0.3 | объёмы входа (lots) |
 | MAX_ENTRIES | 3 | 1 | max scale-in entries |
 | SL_ATR_MULT | 3.0 | 2.0 | SL = N × ATR |
-| TP1_ATR_MULT | 1.5 | 1.0 | TP1 (close first position fully) |
-| TP2_ATR_MULT | 4.0 | 3.0 | TP2 (close entries with TP) |
+| TP1_ATR_MULT | 3.0 | 1.0 | TP1 (close first position fully), был 1.5 |
+| TP2_ATR_MULT | 4.5 | 3.0 | TP2 (close entries with TP), был 4.0 |
 | BE_TRIGGER_PCT | 0.5 | 0.5 | break-even trigger (% PnL), был 0.2 |
 | TRAIL_ACTIVATE_PCT | 0.4 | — | PnL% при котором начинает работать trailing SL |
 | TIME_EXIT_HOURS | 4 | 4 | exit if \|PnL\| < 1% |
