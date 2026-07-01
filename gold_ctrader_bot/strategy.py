@@ -83,10 +83,12 @@ def should_enter(close: list[float], high: list[float], low: list[float], today_
     if adx < ADX_THRESHOLD:
         return False, f"ADX {adx:.1f} < {ADX_THRESHOLD}"
 
-    distance = abs(price - ema) / atr if atr > 0 else 0
-    if distance > 1.5:
-        direction = "above" if price > ema else "below"
-        return False, f"Price {distance:.1f}xATR {direction} EMA ??? too far, wait for pullback"
+    # Distance filter (was 1.5xATR, REMOVED — blocked all strong trends).
+    # Pullback filter in gold_mcp_bot_remote.py (PULLBACK_MAX_MULT=1.0xATR)
+    # handles this better — it's checked AFTER should_enter, with M30 trend
+    # filter confirming direction. This strategy-level filter was redundant
+    # and blocked legitimate trend entries (e.g. ADX=48, price far from EMA
+    # = strong trend, but bot skipped it).
 
     daily_range = today_high - today_low
     if daily_range >= atr:
