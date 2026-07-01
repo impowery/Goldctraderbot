@@ -589,19 +589,25 @@ class GoldMCPRemoteBot:
         if CONSEC_LOSS_COUNT > 0 and len(self.recent_trades) >= CONSEC_LOSS_COUNT:
             recent = self.recent_trades[-CONSEC_LOSS_COUNT:]
             if all(t.get("pnl", 0) < 0 for t in recent):
-                # Check if pause already active
-                pause_key = f"consec_loss_pause_{recent[-1].get('ts','')}"
                 if not hasattr(self, '_consec_pause_until'):
                     self._consec_pause_until = 0
                 if int(time.time()) < self._consec_pause_until:
+                    # Pause still active — wait
                     remaining = self._consec_pause_until - int(time.time())
                     print(f"[Remote] Consec loss pause: {remaining}s remaining ({CONSEC_LOSS_COUNT} losses in a row)")
                     return
-                else:
-                    # Set new pause
-                    self._consec_pause_until = int(time.time()) + CONSEC_LOSS_PAUSE_SEC
-                    print(f"[Remote] Consec loss pause triggered: {CONSEC_LOSS_COUNT} losses in a row → pause {CONSEC_LOSS_PAUSE_SEC}s")
-                    return
+                # Pause expired — reset and continue to strategy signal.
+                # Bot resumes FULL operation: can open entries, scale-in, manage positions.
+                # A new pause will only trigger if we get CONSEC_LOSS_COUNT NEW losses after this point.
+                if self._consec_pause_until > 0:
+                    print(f"[Remote] Consec loss pause EXPIRED — resuming full operation")
+                    self._consec_pause_until = 0
+                    self._save_state()
+            else:
+                # Streak broken (at least one recent trade was profitable) — clear pause
+                if getattr(self, '_consec_pause_until', 0) > 0:
+                    self._consec_pause_until = 0
+                    self._save_state()
         if now - self.entry_time < MIN_INTERVAL_MINUTES * 60 * 1000 and self.entry_time > 0:
             return
 
