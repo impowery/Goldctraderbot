@@ -76,6 +76,22 @@ SCALE_IN_COOLDOWN_SEC = int(os.getenv("SCALE_IN_COOLDOWN_SEC", "300"))
 # Scale-in distance filter: how far price must pull back from avg before adding entry.
 # Default 1.0 × ATR (was 0.5, which was too loose — bot added entries on noise, not real pullbacks).
 SCALE_IN_DISTANCE_MULT = float(os.getenv("SCALE_IN_DISTANCE_MULT", "1.0"))
+# Pullback filter for FIRST entry: max distance (in ATR multiples) price can be from EMA
+# to allow entry. If price > PULLBACK_MAX_MULT * ATR above EMA → skip LONG (buying too high).
+# If price > PULLBACK_MAX_MULT * ATR below EMA → skip SHORT (selling too low).
+# Default 1.0 × ATR. Today's bad LONG at $3984 with EMA $3981 (distance $3, ATR $5 = 0.6xATR)
+# would have passed. But LONG at $3990 (distance $9 = 1.8xATR) would be blocked.
+PULLBACK_MAX_MULT = float(os.getenv("PULLBACK_MAX_MULT", "1.0"))
+# Consecutive loss pause: if last N trades all closed in loss, pause for X seconds.
+# Default: 2 losses → 1800s (30 min) pause. Stops series like today's 4 LONG losses.
+CONSEC_LOSS_COUNT = int(os.getenv("CONSEC_LOSS_COUNT", "2"))
+CONSEC_LOSS_PAUSE_SEC = int(os.getenv("CONSEC_LOSS_PAUSE_SEC", "1800"))
+# Trend filter: check EMA on higher timeframe (M30) to confirm trend direction.
+# If M30 EMA is falling → no LONG entries on M5 (even if M5 price > EMA).
+# If M30 EMA is rising → no SHORT entries on M5 (even if M5 price < EMA).
+# Default: enabled (true). Set to false to disable.
+TREND_FILTER_ENABLED = os.getenv("TREND_FILTER_ENABLED", "true").lower() == "true"
+TREND_FILTER_TF = os.getenv("TREND_FILTER_TF", "M_30")  # M_15, M_30, H_1
 
 # === Dry run mode ===
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
@@ -202,6 +218,14 @@ class GoldMCPRemoteBot:
         self.adx = 0.0
         self.ema = 0.0
         self.last_candle_fetch = 0
+        # M30 trend filter state
+        self.m30_close_prices = []
+        self.m30_ema = 0.0
+        self.m30_ema_prev = 0.0  # previous M30 EMA value (to detect rising/falling)
+        self.last_m30_fetch = 0
+        # Consecutive loss pause tracking
+        self.recent_trades = []  # list of recent trade dicts {ts, pnl, ...}
+        self._consec_pause_until = 0  # timestamp when consecutive loss pause ends
         self.today_high = 0.0
         self.today_low = 0.0
 
@@ -391,6 +415,7 @@ class GoldMCPRemoteBot:
         print(f"[Remote] Bot | {SYMBOL} | entries={ENTRY_VOLUMES} lots "
               f"| max={MAX_ENTRIES} | SL={SL_ATR_MULT}atr | TP1={TP1_ATR_MULT}atr TP2={TP2_ATR_MULT}atr")
         print(f"[Remote] BE trigger={BE_TRIGGER_PCT}% | Time exit={TIME_EXIT_HOURS}h | Scale-in cooldown={SCALE_IN_COOLDOWN_SEC}s | Scale-in distance={SCALE_IN_DISTANCE_MULT}xATR")
+        print(f"[Remote] Pullback filter={PULLBACK_MAX_MULT}xATR | Consec loss pause={CONSEC_LOSS_COUNT}losses→{CONSEC_LOSS_PAUSE_SEC}s | Trend filter M30={TREND_FILTER_ENABLED}")
 
         self._load_state()
 
@@ -560,6 +585,23 @@ class GoldMCPRemoteBot:
             remaining = self.sl_cooldown_until - int(time.time())
             print(f"[Remote] SL cooldown {remaining}s remaining")
             return
+        # Consecutive loss pause: if last N trades all closed in loss, pause
+        if CONSEC_LOSS_COUNT > 0 and len(self.recent_trades) >= CONSEC_LOSS_COUNT:
+            recent = self.recent_trades[-CONSEC_LOSS_COUNT:]
+            if all(t.get("pnl", 0) < 0 for t in recent):
+                # Check if pause already active
+                pause_key = f"consec_loss_pause_{recent[-1].get('ts','')}"
+                if not hasattr(self, '_consec_pause_until'):
+                    self._consec_pause_until = 0
+                if int(time.time()) < self._consec_pause_until:
+                    remaining = self._consec_pause_until - int(time.time())
+                    print(f"[Remote] Consec loss pause: {remaining}s remaining ({CONSEC_LOSS_COUNT} losses in a row)")
+                    return
+                else:
+                    # Set new pause
+                    self._consec_pause_until = int(time.time()) + CONSEC_LOSS_PAUSE_SEC
+                    print(f"[Remote] Consec loss pause triggered: {CONSEC_LOSS_COUNT} losses in a row → pause {CONSEC_LOSS_PAUSE_SEC}s")
+                    return
         if now - self.entry_time < MIN_INTERVAL_MINUTES * 60 * 1000 and self.entry_time > 0:
             return
 
@@ -570,6 +612,31 @@ class GoldMCPRemoteBot:
         if self.adx > 0 and self.adx < 20:
             print(f"[Remote] ADX {self.adx:.1f} < 20 — skip")
             return
+
+        # 7b. Pullback filter: skip if price too far from EMA (buying high / selling low)
+        if PULLBACK_MAX_MULT > 0 and self.atr > 0 and self.ema > 0:
+            distance = abs(price - self.ema) / self.atr
+            if distance > PULLBACK_MAX_MULT:
+                direction = "above" if price > self.ema else "below"
+                print(f"[Remote] Pullback filter: price {distance:.2f}xATR {direction} EMA (> {PULLBACK_MAX_MULT}xATR) — skip")
+                return
+
+        # 7c. Trend filter: check M30 EMA direction, skip counter-trend entries
+        if TREND_FILTER_ENABLED:
+            # Fetch M30 candles if not fetched yet or stale (>5 min old)
+            if int(time.time()) - self.last_m30_fetch > 300:
+                await self.fetch_m30_candles()
+            if self.m30_ema > 0 and self.m30_ema_prev > 0:
+                want_long = "LONG" in reason
+                want_short = "SHORT" in reason
+                m30_rising = self.m30_ema > self.m30_ema_prev
+                m30_falling = self.m30_ema < self.m30_ema_prev
+                if want_long and m30_falling:
+                    print(f"[Remote] Trend filter: M30 EMA falling (${self.m30_ema_prev:.2f}→${self.m30_ema:.2f}) — skip LONG")
+                    return
+                if want_short and m30_rising:
+                    print(f"[Remote] Trend filter: M30 EMA rising (${self.m30_ema_prev:.2f}→${self.m30_ema:.2f}) — skip SHORT")
+                    return
 
         # 8. First entry
         side = "sell" if "SHORT" in reason else "buy"
@@ -669,6 +736,42 @@ class GoldMCPRemoteBot:
         self.today_low = tl if tl != float('inf') else 0
         self.today_high = th if th != float('-inf') else 0
         print(f"[Remote] Fetched {len(bars)} candles | last close=${self.close_prices[-1]:.2f} | today range=${self.today_low:.2f}-${self.today_high:.2f}")
+
+    async def fetch_m30_candles(self):
+        """Fetch M30 candles for trend filter. Calculates EMA20 on M30 closes.
+        Stores current and previous EMA to detect rising/falling trend."""
+        now = datetime.now(timezone.utc)
+        # 100 M30 candles ≈ 50 hours ≈ 2 days. Enough for EMA20 + history.
+        from_dt = now - timedelta(hours=55)
+        from_iso = from_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        to_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        data = await self.call("get_trendbars", {
+            "symbolId": self.symbol_id,
+            "period": TREND_FILTER_TF,
+            "fromTimestamp": from_iso,
+            "toTimestamp": to_iso,
+        })
+        if not data:
+            print(f"[Remote] fetch_m30: no data for {TREND_FILTER_TF}")
+            return
+        bars = data.get("trendbars", []) or data.get("bars", [])
+        if len(bars) < 25:
+            print(f"[Remote] fetch_m30: only {len(bars)} bars for {TREND_FILTER_TF}")
+            return
+        closes = []
+        for b in bars:
+            close = pipettes_to_price(int(b.get("close", b.get("c", 0))), self.pip_digits)
+            closes.append(close)
+        # Calculate EMA20 on M30 closes
+        from strategy import calc_ema
+        new_ema = calc_ema(closes, 20)
+        # Store previous EMA (for trend direction)
+        self.m30_ema_prev = self.m30_ema if self.m30_ema > 0 else new_ema
+        self.m30_ema = new_ema
+        self.m30_close_prices = closes
+        self.last_m30_fetch = int(time.time())
+        trend = "rising" if self.m30_ema > self.m30_ema_prev else ("falling" if self.m30_ema < self.m30_ema_prev else "flat")
+        print(f"[Remote] M30 EMA20=${self.m30_ema:.2f} (prev=${self.m30_ema_prev:.2f}, {trend})")
 
     async def place_market_order(self, side, volume_lots, sl_price=None, tp_price=None):
         """Place MARKET order. volume_lots → cents. SL/TP as relative points.
@@ -877,6 +980,11 @@ class GoldMCPRemoteBot:
         except Exception as e:
             print(f"[Remote] Trade log write failed: {e}")
         self._push_trade_to_vps(entry)
+        # Track recent trades for consecutive loss pause
+        self.recent_trades.append(entry)
+        # Keep only last 10 trades
+        if len(self.recent_trades) > 10:
+            self.recent_trades = self.recent_trades[-10:]
 
     def _push_trade_to_vps(self, trade_data: dict):
         if not VPS_SYNC_ENABLED or not VPS_SYNC_URL:
@@ -894,6 +1002,27 @@ class GoldMCPRemoteBot:
                 print(f"[Remote] VPS sync: trade pushed (pnl={trade_data.get('pnl'):+.2f})")
         except Exception as e:
             print(f"[Remote] VPS trade push error: {e}")
+
+    def _load_recent_trades(self, count: int = 10) -> list:
+        """Load last N trades from trade log file. Used for consecutive loss pause."""
+        if not os.path.exists(TRADE_LOG_PATH):
+            return []
+        try:
+            with open(TRADE_LOG_PATH) as f:
+                lines = f.readlines()
+            trades = []
+            for line in lines[-count * 2:]:  # read last 2x count lines to be safe
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    trades.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            return trades[-count:]
+        except Exception as e:
+            print(f"[Remote] _load_recent_trades failed: {e}")
+            return []
 
     def _push_state_to_vps(self):
         if not VPS_SYNC_ENABLED or not VPS_SYNC_URL:
@@ -956,7 +1085,8 @@ class GoldMCPRemoteBot:
                  "total_pnl": self.total_pnl, "trading_days": list(self.trading_days),
                  "target_hit": self.target_hit, "sl_cooldown_until": self.sl_cooldown_until, "consecutive_losses": self.consecutive_losses, "current_sl": self.current_sl,
                  "initial_balance": self.initial_balance,
-                 "last_scale_in_time": self.last_scale_in_time}
+                 "last_scale_in_time": self.last_scale_in_time,
+                 "consec_pause_until": self._consec_pause_until}
         tmp = STATE_FILE_PATH + ".tmp"
         try:
             with open(tmp, "w") as f:
@@ -993,6 +1123,9 @@ class GoldMCPRemoteBot:
             self.current_sl = state.get("current_sl", 0.0)
             self.initial_balance = state.get("initial_balance")
             self.last_scale_in_time = state.get("last_scale_in_time", 0)
+            self._consec_pause_until = state.get("consec_pause_until", 0)
+            # Load recent trades from trade log file (for consecutive loss pause)
+            self.recent_trades = self._load_recent_trades(10)
             if self.entries:
                 print(f"[Remote] State restored: {len(self.entries)} entries, "
                       f"{'SHORT' if self.is_short else 'LONG'} @ {self.avg_price:.2f}")
@@ -1468,6 +1601,9 @@ class GoldMCPRemoteBot:
             print(f"[Remote] SL cooldown {cooldown}s (consecutive loss #{self.consecutive_losses})")
         elif pnl >= 0:
             self.consecutive_losses = 0
+            # Reset consecutive loss pause on profitable trade
+            self._consec_pause_until = 0
+            print(f"[Remote] Profitable trade — consec loss pause reset")
         self._save_state()
 
 
