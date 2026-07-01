@@ -140,17 +140,24 @@ tail -f /root/bots/logs/gold_remote.log   # лог из файла
 |---|---|---|---|
 | TIMEFRAME | M_5 | M_15 | таймфрейм свечей |
 | CANDLE_COUNT | 100 | 60 | сколько свечей тянуть |
+| EMA_PERIOD | 14 | — | период EMA (был 20, стал 14 — быстрее) |
 | ENTRY_VOLUMES | 0.3,0.3,0.3 | 0.3 | объёмы входа (lots) |
 | MAX_ENTRIES | 3 | 1 | max scale-in entries |
 | SL_ATR_MULT | 3.0 | 2.0 | SL = N × ATR |
 | TP1_ATR_MULT | 1.5 | 1.0 | TP1 (close first position fully) |
 | TP2_ATR_MULT | 4.0 | 3.0 | TP2 (close entries with TP) |
-| BE_TRIGGER_PCT | 0.2 | 0.5 | break-even trigger (% PnL) |
+| BE_TRIGGER_PCT | 0.5 | 0.5 | break-even trigger (% PnL), был 0.2 |
 | TIME_EXIT_HOURS | 4 | 4 | exit if \|PnL\| < 1% |
 | SCALE_IN_COOLDOWN_SEC | 300 | — | между входами |
 | SCALE_IN_DISTANCE_MULT | 1.0 | — | min откат от avg для scale-in (×ATR) |
-| COOLDOWN_AFTER_SL | 1800 | 1800 | cooldown после SL (с эскалацией) |
+| PULLBACK_MAX_MULT | 3.0 | — | max дистанция цены от EMA для входа (×ATR), был 1.0 |
+| CONSEC_LOSS_COUNT | 2 | — | сколько лосей подряд → пауза |
+| CONSEC_LOSS_PAUSE_SEC | 1800 | — | пауза после N лосей (сек) |
+| TREND_FILTER_ENABLED | true | — | M30 trend filter вкл/выкл |
+| TREND_FILTER_TF | M_30 | — | таймфрейм для trend filter |
+| COOLDOWN_AFTER_SL | 1800 | 1800 | базовый cooldown после SL (эскалация 30→60, max 60 мин) |
 | ADX_THRESHOLD | 25 (hardcoded) | 22 | минимальный ADX для входа |
+| Daily range filter | 0.95 | — | LONG skip если >95% дня (был 0.7), SHORT skip если <5% (был 0.3) |
 
 ### 5.3 Scale-in логика (добивка на откатах)
 ```
@@ -318,22 +325,21 @@ gold-remote.service (GOLD bot)
 
 ---
 
-## 11. Live метрики (snapshot 2026-06-30 05:17 UTC)
+## 11. Live метрики (snapshot 2026-07-01 15:57 UTC)
 
 ### GOLD bot
 - **Service:** active (running), systemd, auto-restart включён
-- **Balance:** $102,608.45 (старт $98,885.88, **+$3,061.16**)
-- **Сделок за 7 дней:** 40 (25W / 15L, win rate 62.5%)
-- **Avg win:** +$226.54, **Avg loss:** -$173.50
-- **Best:** +$793.88, **Worst:** -$491.59
-- **Max win streak:** 7, **Max loss streak:** 4
+- **Balance:** $101,967.99 (старт $98,885.88, **+$3,082.11**)
+- **Сделок за 7 дней:** 53 (31W / 22L, win rate 58.5%)
+- **Total PnL:** +$2,596.31
 
 ### Daily breakdown
 | День | Сделок | W/L | Win% | PnL |
 |---|---|---|---|---|
 | 2026-06-26 | 22 | 11W/11L | 50% | -$870.48 |
-| 2026-06-29 | 10 | 9W/1L | 90% | +$2,534.10 |
-| 2026-06-30 | 8 | 5W/3L | 62% | +$1,397.54 |
+| 2026-06-29 | 13 | 11W/2L | 85% | +$2,534.10 |
+| 2026-06-30 | 13 | 8W/5L | 62% | +$1,397.54 |
+| 2026-07-01 | 5 | 1W/4L | 20% | -$488 (4 LONG убытка утром) |
 
 ### По причинам закрытия
 | Reason | Сделок | Win% | Total PnL |
@@ -423,6 +429,7 @@ systemctl restart gold-remote
 | 38 | Distance filter 1.5×ATR в strategy.py блокировал ВСЕ сильные тренды — при ADX=48 цена всегда далеко от EMA | Убран distance filter 1.5×ATR из strategy.py |
 | 39 | **Бот не переподключался при истечении MCP сессии** — cTrader возвращал 404 на `tools/call`, бот печатал ошибки 3 часа но не reconect | Счётчик consecutive 404, после 3 → `reconnect()` автоматически |
 | 40 | Pullback filter 1.0×ATR + daily range filter 0.7 блокировали входы на сильных трендах — distance 4.15×ATR и range_pos 96% блокировали LONG при ADX=50 | `PULLBACK_MAX_MULT=3.0` (была 1.0) + daily range `0.95` (было 0.7) |
+| 41 | Cooldown после SL имел потолок 120 мин (2 часа) — слишком долго, бот пропускал возможности | Потолок уменьшен с 7200s (120m) до 3600s (60m). Эскалация: 30→60, max 60 мин |
 
 ---
 
@@ -467,7 +474,7 @@ systemctl restart gold-remote
 
 ## TL;DR для нового чата
 
-«2 live бота на cTrader Remote MCP (GOLD $100K +$3,061 + BTC $5K -$161) + 5 paper ботов на Hyperliquid. Live боты работают 24/7 на Linux VPS 193.233.19.171, без cTrader Desktop. Стратегия: EMA20+ADX+ATR, scale-in 3 entries, SL=3×ATR, TP2=4×ATR. Volume formula: new_volume = current × (new_balance/old_balance) × (old_lev/new_lev). relativeStopLoss/TakeProfit в PIPETTES, rounded to 1000 (XAU) / 100 (BTC). Dashboard: http://193.233.19.171:8080/report_latest.html. Telegram: @AITradingAlertPNLBot. GitHub: github.com/impowery/Goldctraderbot. SSH: root@193.233.19.171 (пароль в Notes). Контекст: BOT_CONTEXT.md (единственный файл, дубликатов нет).»
+«2 live бота на cTrader Remote MCP (GOLD $100K +$3,082 + BTC $5K) + 5 paper ботов на Hyperliquid. Live боты работают 24/7 на Linux VPS 193.233.19.171, без cTrader Desktop. Стратегия: EMA14+ADX+ATR (была EMA20, изменена 01.07), scale-in 3 entries, SL=3×ATR, TP2=4×ATR, per-entry trailing SL, M30 trend filter, pullback filter 3.0×ATR, BE 0.5%, consec loss pause 30 мин, cooldown 30→60 мин (max 60). Volume formula: new_volume = current × (new_balance/old_balance) × (old_lev/new_lev). relativeStopLoss/TakeProfit в PIPETTES, rounded to 1000 (XAU) / 100 (BTC). Dashboard: http://193.233.19.171:8080/report_latest.html. Telegram: @AITradingAlertPNLBot. GitHub: github.com/impowery/Goldctraderbot. SSH: root@193.233.19.171 (пароль в Notes). Контекст: BOT_CONTEXT.md (единственный файл, дубликатов нет).»
 
 ---
 
