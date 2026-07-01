@@ -145,10 +145,15 @@ tail -f /root/bots/logs/gold_remote.log   # лог из файла
 | SL_ATR_MULT | 3.0 | 2.0 | SL = N × ATR |
 | TP1_ATR_MULT | 1.5 | 1.0 | TP1 (close first position fully) |
 | TP2_ATR_MULT | 4.0 | 3.0 | TP2 (close entries with TP) |
-| BE_TRIGGER_PCT | 0.2 | 0.5 | break-even trigger (% PnL) |
+| BE_TRIGGER_PCT | 0.5 | 0.5 | break-even trigger (% PnL) |
 | TIME_EXIT_HOURS | 4 | 4 | exit if \|PnL\| < 1% |
 | SCALE_IN_COOLDOWN_SEC | 300 | — | между входами |
 | SCALE_IN_DISTANCE_MULT | 1.0 | — | min откат от avg для scale-in (×ATR) |
+| PULLBACK_MAX_MULT | 1.0 | — | max дистанция цены от EMA для входа (×ATR) |
+| CONSEC_LOSS_COUNT | 2 | — | сколько лосей подряд → пауза |
+| CONSEC_LOSS_PAUSE_SEC | 1800 | — | пауза после N лосей (сек) |
+| TREND_FILTER_ENABLED | true | — | M30 trend filter вкл/выкл |
+| TREND_FILTER_TF | M_30 | — | таймфрейм для trend filter |
 | COOLDOWN_AFTER_SL | 1800 | 1800 | cooldown после SL (с эскалацией) |
 | ADX_THRESHOLD | 25 (hardcoded) | 22 | минимальный ADX для входа |
 
@@ -414,6 +419,10 @@ systemctl restart gold-remote
 | 29 | `amend_position`/`close_position` на закрытые позиции генерировали 404 каждую минуту (83 ошибки) | `_remove_stale_position()` — убирает position_id из state когда cTrader возвращает 404 |
 | 30 | Scale-in срабатывал на шумовом колебании (0.5×ATR ≈ $2.5) — 3 входа за 17 мин на движении $9, avg price слишком близко к 1-й цене | `SCALE_IN_DISTANCE_MULT=1.0` в `.env` (была 0.5) — нужен реальный откат ≥ 1×ATR |
 | 31 | **Trailing SL и BE применялись ко всем позициям одновременно (одна цена SL для всех)** — 3 LONG со SL в одной точке $4022, маркетмейкеры зацепили кластер на лою отката $4021, -$1,527 убытка | Per-entry trailing SL + BE: каждая позиция имеет свой `extreme_price` и `sl_price`, SL считается от entry_price каждой позиции. Сегодня SL были бы $4018/$4010/$4008 — лой $4021 не задел бы ни один |
+| 32 | BE_TRIGGER_PCT=0.2% слишком tight — $8 движения на $4000 триггерили BE, позиции закрывались на шуме | `BE_TRIGGER_PCT=0.5%` в `.env` — нужно $20 движения |
+| 33 | Нет паузы после серии убытков — сегодня 4 LONG подряд закрылись по SL (-$547 за час) | `CONSEC_LOSS_COUNT=2` + `CONSEC_LOSS_PAUSE_SEC=1800` — 2 лося → 30 мин пауза |
+| 34 | Momentum-вход "цена > EMA = LONG" не различает тренд и флэт — в падающем рынке EMA тоже падает, "выше EMA" = ловушка | `PULLBACK_MAX_MULT=1.0` — не покупать если цена дальше 1×ATR от EMA |
+| 35 | Нет проверки старшего таймфрейма — бот открывал LONG на M5 когда M30 EMA падала (контр-тренд) | `TREND_FILTER_ENABLED=true` + `TREND_FILTER_TF=M_30` — если M30 EMA падает, LONG не открывается |
 
 ---
 
