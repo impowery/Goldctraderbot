@@ -147,6 +147,7 @@ tail -f /root/bots/logs/gold_remote.log   # лог из файла
 | TP1_ATR_MULT | 1.5 | 1.0 | TP1 (close first position fully) |
 | TP2_ATR_MULT | 4.0 | 3.0 | TP2 (close entries with TP) |
 | BE_TRIGGER_PCT | 0.5 | 0.5 | break-even trigger (% PnL), был 0.2 |
+| TRAIL_ACTIVATE_PCT | 0.4 | — | PnL% при котором начинает работать trailing SL |
 | TIME_EXIT_HOURS | 4 | 4 | exit if \|PnL\| < 1% |
 | SCALE_IN_COOLDOWN_SEC | 300 | — | между входами |
 | SCALE_IN_DISTANCE_MULT | 1.0 | — | min откат от avg для scale-in (×ATR) |
@@ -430,6 +431,7 @@ systemctl restart gold-remote
 | 39 | **Бот не переподключался при истечении MCP сессии** — cTrader возвращал 404 на `tools/call`, бот печатал ошибки 3 часа но не reconect | Счётчик consecutive 404, после 3 → `reconnect()` автоматически |
 | 40 | Pullback filter 1.0×ATR + daily range filter 0.7 блокировали входы на сильных трендах — distance 4.15×ATR и range_pos 96% блокировали LONG при ADX=50 | `PULLBACK_MAX_MULT=3.0` (была 1.0) + daily range `0.95` (было 0.7) |
 | 41 | Cooldown после SL имел потолок 120 мин (2 часа) — слишком долго, бот пропускал возможности | Потолок уменьшен с 7200s (120m) до 3600s (60m). Эскалация: 30→60, max 60 мин |
+| 42 | **Trailing SL работал с 1-го тика** — цена чуть вверх → SL подтянулся → цена развернулась → SL снесло. Сегодня 4 LONG: peak +$5, trailing подтянул SL с $3967 до $3976, цена развернулась и снесла. Без trailing позиции выжили бы | Trailing SL активируется только при PnL ≥ +0.4% (`TRAIL_ACTIVATE_PCT=0.4`). До этого SL стоит на initial (entry - 3×ATR) |
 
 ---
 
