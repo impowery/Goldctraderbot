@@ -93,9 +93,11 @@ def should_enter(close: list[float], high: list[float], low: list[float], today_
     daily_range = today_high - today_low
     if daily_range >= atr:
         range_pos = (price - today_low) / daily_range
-        if price > ema and range_pos > 0.7:
+        # Relaxed from 0.7/0.3 to 0.95/0.05 — was blocking strong trend entries
+        # Bot can now buy up to 95% of daily range (was 70%)
+        if price > ema and range_pos > 0.95:
             return False, f"LONG skip at {range_pos*100:.0f}% daily range"
-        if price < ema and range_pos < 0.3:
+        if price < ema and range_pos < 0.05:
             return False, f"SHORT skip at {range_pos*100:.0f}% daily range"
 
     if price > ema:

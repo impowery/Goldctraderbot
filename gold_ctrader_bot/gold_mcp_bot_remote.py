@@ -272,7 +272,8 @@ class GoldMCPRemoteBot:
         return headers
 
     async def mcp_request(self, method, params=None):
-        """Send MCP request, parse SSE response, return parsed JSON or None."""
+        """Send MCP request, parse SSE response, return parsed JSON or None.
+        If HTTP 404 (session expired), increment error counter and reconnect after 3 failures."""
         req_id = int(time.time() * 1000) % 100000
         body = {"jsonrpc": "2.0", "id": req_id, "method": method}
         if params:
@@ -281,9 +282,29 @@ class GoldMCPRemoteBot:
         try:
             resp = await self.client.post(MCP_URL, json=body, headers=headers)
             resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status == 404:
+                # Session expired — cTrader returns 404 on tools/call when session is dead
+                if not hasattr(self, '_consecutive_404'):
+                    self._consecutive_404 = 0
+                self._consecutive_404 += 1
+                print(f"[Remote] HTTP 404 in {method} (session expired?) — count={self._consecutive_404}")
+                if self._consecutive_404 >= 3:
+                    print(f"[Remote] 3 consecutive 404s — reconnecting...")
+                    self._consecutive_404 = 0
+                    await self.reconnect()
+                return None
+            else:
+                print(f"[Remote] HTTP {status} error in {method}: {e}")
+                return None
         except Exception as e:
             print(f"[Remote] HTTP error in {method}: {e}")
             return None
+
+        # Success — reset 404 counter
+        if hasattr(self, '_consecutive_404'):
+            self._consecutive_404 = 0
 
         # Parse SSE: lines starting with "data: "
         for line in resp.text.split("\n"):
