@@ -18,4 +18,4 @@ TAKE_PROFIT_PIPS = 400
 MIN_INTERVAL_MINUTES = 60
 ADX_THRESHOLD = 25
 ATR_PERIOD = 14
-EMA_PERIOD = 20
+EMA_PERIOD = int(os.getenv("EMA_PERIOD", "14"))  # was 20 (too slow, missed strong trends); 14 follows price faster
