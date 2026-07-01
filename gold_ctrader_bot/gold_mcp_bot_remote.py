@@ -437,6 +437,7 @@ class GoldMCPRemoteBot:
               f"| max={MAX_ENTRIES} | SL={SL_ATR_MULT}atr | TP1={TP1_ATR_MULT}atr TP2={TP2_ATR_MULT}atr")
         print(f"[Remote] BE trigger={BE_TRIGGER_PCT}% | Time exit={TIME_EXIT_HOURS}h | Scale-in cooldown={SCALE_IN_COOLDOWN_SEC}s | Scale-in distance={SCALE_IN_DISTANCE_MULT}xATR")
         print(f"[Remote] Pullback filter={PULLBACK_MAX_MULT}xATR | Consec loss pause={CONSEC_LOSS_COUNT}losses→{CONSEC_LOSS_PAUSE_SEC}s | Trend filter M30={TREND_FILTER_ENABLED}")
+        print(f"[Remote] Trailing SL activates at +{TRAIL_ACTIVATE_PCT}% PnL | BE at +{BE_TRIGGER_PCT}% | Cooldown max 60m")
 
         self._load_state()
 
@@ -1455,23 +1456,34 @@ class GoldMCPRemoteBot:
             cur_sl = entry.get("sl_price", 0)
             be_done = entry.get("be_triggered", False)
 
-            # Trailing SL: update extreme_price if price made new high (LONG) / low (SHORT)
+            # Trailing SL: only active when entry PnL >= TRAIL_ACTIVATE_PCT (default 0.4%).
+            # Was: trailing moved SL on every tick (caused stop-hunts in sideways market —
+            # price slightly up → SL tightens → price reverses → SL hit).
+            # Now: SL stays at initial (entry - 3*ATR) until position reaches +0.4% profit,
+            # then trailing activates to protect accumulated profit.
             if not self.is_short:
-                if price > extreme:
-                    entry["extreme_price"] = price
-                    extreme = price
-                new_sl = extreme - td
-                # Only move SL UP for LONG (tighter); skip if no improvement
-                if cur_sl == 0 or new_sl > cur_sl:
-                    sl_updates[pid] = new_sl
+                entry_pnl_pct_for_trail = (price - entry_price) / entry_price * 100
             else:
-                if price < extreme:
-                    entry["extreme_price"] = price
-                    extreme = price
-                new_sl = extreme + td
-                # Only move SL DOWN for SHORT (tighter); skip if no improvement
-                if cur_sl == 0 or new_sl < cur_sl:
-                    sl_updates[pid] = new_sl
+                entry_pnl_pct_for_trail = (entry_price - price) / entry_price * 100
+
+            if entry_pnl_pct_for_trail >= TRAIL_ACTIVATE_PCT:
+                # Trailing SL active
+                if not self.is_short:
+                    if price > extreme:
+                        entry["extreme_price"] = price
+                        extreme = price
+                    new_sl = extreme - td
+                    # Only move SL UP for LONG (tighter); skip if no improvement
+                    if cur_sl == 0 or new_sl > cur_sl:
+                        sl_updates[pid] = new_sl
+                else:
+                    if price < extreme:
+                        entry["extreme_price"] = price
+                        extreme = price
+                    new_sl = extreme + td
+                    # Only move SL DOWN for SHORT (tighter); skip if no improvement
+                    if cur_sl == 0 or new_sl < cur_sl:
+                        sl_updates[pid] = new_sl
 
             # Break-even: per entry, when THIS entry's PnL >= BE_TRIGGER_PCT
             if not be_done:
