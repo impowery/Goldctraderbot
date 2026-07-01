@@ -329,6 +329,17 @@ def watch_once(args):
     new_alerts_sent = 0
     last_known_ts = state.get("last_trade_ts")
 
+    # SAFETY: if state was reset (last_trade_ts is None), do NOT re-send all historical trades.
+    # Instead, just set last_trade_ts to the latest trade and skip sending alerts for old trades.
+    # This prevents spamming the user with 100+ old trade alerts after a state reset.
+    if last_known_ts is None and trades:
+        latest_ts = parse_ts(trades[-1].get("ts"))
+        if latest_ts:
+            state["last_trade_ts"] = latest_ts.isoformat()
+            save_alert_state(state)
+            print(f"[ALERT] State was reset — set last_trade_ts to {latest_ts.isoformat()} (skipped {len(trades)} old trades)")
+            return 0
+
     new_trades = []
     for t in trades:
         t_ts = parse_ts(t.get("ts"))
@@ -353,6 +364,9 @@ def watch_once(args):
             state["last_trade_ts"] = latest_ts.isoformat()
 
     # Check anomalies
+    # IMPORTANT: only send anomalies for NEW trades (when last_trade_ts changed).
+    # Without this, large_loss would be sent every cron run (15 min) for the same losing trade.
+    is_new_trade = bool(new_trades) or last_known_ts is None
     anomalies = check_anomalies(trades, state)
     for anomaly in anomalies:
         if anomaly["type"] == "consec_losses":
@@ -362,8 +376,14 @@ def watch_once(args):
                 tg_send(msg)
                 state["consec_losses_alerted"] = anomaly["count"]
         elif anomaly["type"] == "large_loss":
-            msg = fmt_anomaly_alert("large_loss", loss=anomaly["loss"], pct=anomaly["pct"], reason=anomaly["reason"])
-            tg_send(msg)
+            # Dedup: only send if this is a NEW trade (not the same one we already alerted)
+            # Track the ts of the last trade we sent a large_loss alert for.
+            last_large_loss_ts = state.get("last_large_loss_ts")
+            current_last_ts = trades[-1].get("ts") if trades else None
+            if current_last_ts and current_last_ts != last_large_loss_ts and is_new_trade:
+                msg = fmt_anomaly_alert("large_loss", loss=anomaly["loss"], pct=anomaly["pct"], reason=anomaly["reason"])
+                tg_send(msg)
+                state["last_large_loss_ts"] = current_last_ts
 
     # Reset consec_losses tracking if streak broken
     if trades and trades[-1]["pnl"] >= 0:
