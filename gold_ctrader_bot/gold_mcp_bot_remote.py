@@ -1187,7 +1187,7 @@ class GoldMCPRemoteBot:
                 print(f"[Remote] External close recorded | PnL: ${pnl:+.2f} | total: ${self.total_pnl:+.2f}")
                 if pnl < 0 and COOLDOWN_AFTER_SL > 0:
                     self.consecutive_losses = getattr(self, 'consecutive_losses', 0) + 1
-                    cooldown = min(COOLDOWN_AFTER_SL * (2 ** (self.consecutive_losses - 1)), 7200)
+                    cooldown = min(COOLDOWN_AFTER_SL * (2 ** (self.consecutive_losses - 1)), 3600)  # 30m → 60m, max 60m
                     self.sl_cooldown_until = int(time.time()) + cooldown
                     print(f"[Remote] SL cooldown {cooldown}s (consecutive loss #{self.consecutive_losses})")
                 elif pnl >= 0:
@@ -1623,7 +1623,7 @@ class GoldMCPRemoteBot:
         # SL cooldown: trigger on negative PnL, with escalation for consecutive losses
         if pnl < 0 and COOLDOWN_AFTER_SL > 0:
             self.consecutive_losses = getattr(self, 'consecutive_losses', 0) + 1
-            cooldown = min(COOLDOWN_AFTER_SL * (2 ** (self.consecutive_losses - 1)), 7200)  # 30m → 60m → 120m, max 2h
+            cooldown = min(COOLDOWN_AFTER_SL * (2 ** (self.consecutive_losses - 1)), 3600)  # 30m → 60m, max 60m
             self.sl_cooldown_until = int(time.time()) + cooldown
             print(f"[Remote] SL cooldown {cooldown}s (consecutive loss #{self.consecutive_losses})")
         elif pnl >= 0:
