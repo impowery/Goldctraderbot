@@ -223,6 +223,9 @@ class GoldMCPRemoteBot:
         self.m30_ema = 0.0
         self.m30_ema_prev = 0.0  # previous M30 EMA value (to detect rising/falling)
         self.last_m30_fetch = 0
+        # Daily open (from H1 candle) for daily trend filter
+        self.today_open = 0.0
+        self.last_daily_open_fetch = 0
         # Consecutive loss pause tracking
         self.recent_trades = []  # list of recent trade dicts {ts, pnl, ...}
         self._consec_pause_until = 0  # timestamp when consecutive loss pause ends
@@ -666,6 +669,23 @@ class GoldMCPRemoteBot:
                     print(f"[Remote] Trend filter: M30 EMA rising (${self.m30_ema_prev:.2f}→${self.m30_ema:.2f}) — skip SHORT")
                     return
 
+        # 7d. Daily trend filter: don't trade against daily direction.
+        # If price > today's open → daily trend UP → only LONG allowed
+        # If price < today's open → daily trend DOWN → only SHORT allowed
+        # Fetch daily open every 30 min (H1 candle updates hourly)
+        if int(time.time()) - self.last_daily_open_fetch > 1800:
+            await self.fetch_daily_open()
+            self.last_daily_open_fetch = int(time.time())
+        if self.today_open > 0:
+            want_long = "LONG" in reason
+            want_short = "SHORT" in reason
+            if price > self.today_open and want_short:
+                print(f"[Remote] Daily trend filter: price ${price:.2f} > open ${self.today_open:.2f} (UP) — skip SHORT")
+                return
+            if price < self.today_open and want_long:
+                print(f"[Remote] Daily trend filter: price ${price:.2f} < open ${self.today_open:.2f} (DOWN) — skip LONG")
+                return
+
         # 8. First entry
         side = "sell" if "SHORT" in reason else "buy"
         await self.open_entry(side, price, balance)
@@ -790,16 +810,66 @@ class GoldMCPRemoteBot:
         for b in bars:
             close = pipettes_to_price(int(b.get("close", b.get("c", 0))), self.pip_digits)
             closes.append(close)
-        # Calculate EMA20 on M30 closes
+        # Calculate EMA41 on M30 closes (41 × 30min = 20.5 hours ≈ 1 day)
+        # Was EMA20 (10 hours, too short — reacted to intraday pullbacks as trend changes)
         from strategy import calc_ema
-        new_ema = calc_ema(closes, 20)
+        new_ema = calc_ema(closes, 41)
         # Store previous EMA (for trend direction)
         self.m30_ema_prev = self.m30_ema if self.m30_ema > 0 else new_ema
         self.m30_ema = new_ema
         self.m30_close_prices = closes
         self.last_m30_fetch = int(time.time())
         trend = "rising" if self.m30_ema > self.m30_ema_prev else ("falling" if self.m30_ema < self.m30_ema_prev else "flat")
-        print(f"[Remote] M30 EMA20=${self.m30_ema:.2f} (prev=${self.m30_ema_prev:.2f}, {trend})")
+        print(f"[Remote] M30 EMA41=${self.m30_ema:.2f} (prev=${self.m30_ema_prev:.2f}, {trend})")
+
+    async def fetch_daily_open(self):
+        """Fetch today's open price from H1 candles.
+        Finds the first H1 candle of the current MSK day and takes its open price.
+        This is the benchmark for daily trend direction (variant D).
+        Logged so user can verify against cTrader Web."""
+        now = datetime.now(timezone.utc)
+        # Fetch last 48 H1 candles (2 days) to ensure we get today's first candle
+        from_dt = now - timedelta(hours=48)
+        from_iso = from_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        to_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        data = await self.call("get_trendbars", {
+            "symbolId": self.symbol_id,
+            "period": "H_1",
+            "fromTimestamp": from_iso,
+            "toTimestamp": to_iso,
+        })
+        if not data:
+            print(f"[Remote] fetch_daily_open: no H1 data")
+            return
+        bars = data.get("trendbars", []) or data.get("bars", [])
+        if not bars:
+            print(f"[Remote] fetch_daily_open: no H1 bars")
+            return
+        today_str = datetime.now(MSK).strftime("%Y-%m-%d")
+        daily_open = None
+        daily_open_time = None
+        for b in bars:
+            open_p = pipettes_to_price(int(b.get("open", b.get("o", 0))), self.pip_digits)
+            ts_raw = b.get("utcBeginInMinutes") or b.get("timestamp") or b.get("t")
+            if ts_raw is not None:
+                if isinstance(ts_raw, (int, float)):
+                    if ts_raw > 1e12:
+                        ts_sec = ts_raw / 1000
+                    elif ts_raw > 1e10:
+                        ts_sec = ts_raw
+                    else:
+                        ts_sec = ts_raw * 60
+                    candle_dt = datetime.fromtimestamp(ts_sec, tz=MSK)
+                    if candle_dt.strftime("%Y-%m-%d") == today_str:
+                        if daily_open is None:
+                            daily_open = open_p
+                            daily_open_time = candle_dt.strftime("%H:%M MSK")
+                            break  # first H1 candle of the day = daily open
+        if daily_open is not None:
+            self.today_open = daily_open
+            print(f"[Remote] Daily open: ${daily_open:.2f} (from H1 candle at {daily_open_time}) — benchmark for daily trend")
+        else:
+            print(f"[Remote] fetch_daily_open: no H1 candle found for today ({today_str})")
 
     async def place_market_order(self, side, volume_lots, sl_price=None, tp_price=None):
         """Place MARKET order. volume_lots → cents. SL/TP as relative points.
