@@ -159,7 +159,7 @@ tail -f /root/bots/logs/gold_remote.log   # лог из файла
 | M30 EMA period | 41 | — | EMA41 на M30 (20.5 часов ≈ 1 день), было 20 |
 | Daily trend filter | H1 open | — | price > today's H1 open → только LONG |
 | COOLDOWN_AFTER_SL | 1800 | 1800 | базовый cooldown после SL (эскалация 30→60, max 60 мин) |
-| ADX_THRESHOLD | 25 (hardcoded) | 22 | минимальный ADX для входа |
+| ADX_THRESHOLD | 20 | 22 | минимальный ADX для входа (был 25), configurable в .env |
 | Daily range filter | 0.95 | — | LONG skip если >95% дня (был 0.7), SHORT skip если <5% (был 0.3) |
 
 ### 5.3 Scale-in логика (добивка на откатах)
@@ -435,6 +435,7 @@ systemctl restart gold-remote
 | 41 | Cooldown после SL имел потолок 120 мин (2 часа) — слишком долго, бот пропускал возможности | Потолок уменьшен с 7200s (120m) до 3600s (60m). Эскалация: 30→60, max 60 мин |
 | 42 | **Trailing SL работал с 1-го тика** — цена чуть вверх → SL подтянулся → цена развернулась → SL снесло. Сегодня 4 LONG: peak +$5, trailing подтянул SL с $3967 до $3976, цена развернулась и снесла. Без trailing позиции выжили бы | Trailing SL активируется только при PnL ≥ +0.4% (`TRAIL_ACTIVATE_PCT=0.4`). До этого SL стоит на initial (entry - 3×ATR) |
 | 43 | **M30 EMA20 = 10 часов** — слишком короткая, реагировала на внутридневные откаты как на смену тренда. Сегодня M30 EMA20 упала с $4052 до $4049 на откате → бот решил "тренд вниз" и шортил на $4035 → цена развернулась вверх → -$393 | M30 EMA: 20 → **41** (20.5 часов ≈ 1 день). Также добавлен **daily trend filter**: price > today's H1 open → только LONG, price < open → только SHORT. Daily open берётся из первой H1 свечи MSK дня, логируется для бенчмарка |
+| 44 | ADX_THRESHOLD=25 (hardcoded) + дублирующая проверка `adx < 20` в основном коде — блокировали входы при ADX 20-25, бот пропускал тренды | `ADX_THRESHOLD=20` в `.env` (configurable), дублирующая проверка убрана |
 
 ---
 
