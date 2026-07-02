@@ -440,7 +440,7 @@ class GoldMCPRemoteBot:
               f"| max={MAX_ENTRIES} | SL={SL_ATR_MULT}atr | TP1={TP1_ATR_MULT}atr TP2={TP2_ATR_MULT}atr")
         print(f"[Remote] BE trigger={BE_TRIGGER_PCT}% | Time exit={TIME_EXIT_HOURS}h | Scale-in cooldown={SCALE_IN_COOLDOWN_SEC}s | Scale-in distance={SCALE_IN_DISTANCE_MULT}xATR")
         print(f"[Remote] Pullback filter={PULLBACK_MAX_MULT}xATR | Consec loss pause={CONSEC_LOSS_COUNT}losses→{CONSEC_LOSS_PAUSE_SEC}s | Trend filter M30={TREND_FILTER_ENABLED}")
-        print(f"[Remote] Trailing SL activates at +{TRAIL_ACTIVATE_PCT}% PnL | BE at +{BE_TRIGGER_PCT}% | Cooldown max 60m")
+        print(f"[Remote] Trailing SL only after BE (+{BE_TRIGGER_PCT}%) | Cooldown max 60m")
 
         self._load_state()
 
@@ -1525,18 +1525,38 @@ class GoldMCPRemoteBot:
             cur_sl = entry.get("sl_price", 0)
             be_done = entry.get("be_triggered", False)
 
-            # Trailing SL: only active when entry PnL >= TRAIL_ACTIVATE_PCT (default 0.4%).
-            # Was: trailing moved SL on every tick (caused stop-hunts in sideways market —
-            # price slightly up → SL tightens → price reverses → SL hit).
-            # Now: SL stays at initial (entry - 3*ATR) until position reaches +0.4% profit,
-            # then trailing activates to protect accumulated profit.
-            if not self.is_short:
-                entry_pnl_pct_for_trail = (price - entry_price) / entry_price * 100
-            else:
-                entry_pnl_pct_for_trail = (entry_price - price) / entry_price * 100
+            # ─── Two-stage SL protection: BE first, then trailing ──────────
+            # Stage 1: SL stays at initial (entry - 3*ATR) — no movement
+            # Stage 2: When PnL >= BE_TRIGGER_PCT (0.5%), move SL to entry (break-even)
+            # Stage 3: After BE, trailing SL activates — follows extreme_price - 3*ATR
+            #
+            # This prevents stop-hunts: price slightly up → SL tightens → price reverses → SL hit.
+            # Trailing only protects REAL profit (after BE).
 
-            if entry_pnl_pct_for_trail >= TRAIL_ACTIVATE_PCT:
-                # Trailing SL active
+            # Break-even: per entry, when THIS entry's PnL >= BE_TRIGGER_PCT
+            if not be_done:
+                if not self.is_short:
+                    entry_pnl_pct = (price - entry_price) / entry_price * 100
+                else:
+                    entry_pnl_pct = (entry_price - price) / entry_price * 100
+                if entry_pnl_pct >= BE_TRIGGER_PCT:
+                    if not self.is_short:
+                        be_sl = entry_price + be_offset
+                    else:
+                        be_sl = entry_price - be_offset
+                    # BE overrides initial SL if tighter
+                    if not self.is_short:
+                        if cur_sl == 0 or be_sl > cur_sl:
+                            sl_updates[pid] = be_sl
+                    else:
+                        if cur_sl == 0 or be_sl < cur_sl:
+                            sl_updates[pid] = be_sl
+                    entry["be_triggered"] = True
+                    print(f"[Remote] BREAK-EVEN pos {pid}: entry=${entry_price:.2f} "
+                          f"PnL={entry_pnl_pct:.2f}% >= {BE_TRIGGER_PCT}% SL=${be_sl:.2f}")
+
+            # Trailing SL: ONLY active after BE has triggered (be_done = True)
+            if be_done:
                 if not self.is_short:
                     if price > extreme:
                         entry["extreme_price"] = price
@@ -1553,29 +1573,6 @@ class GoldMCPRemoteBot:
                     # Only move SL DOWN for SHORT (tighter); skip if no improvement
                     if cur_sl == 0 or new_sl < cur_sl:
                         sl_updates[pid] = new_sl
-
-            # Break-even: per entry, when THIS entry's PnL >= BE_TRIGGER_PCT
-            if not be_done:
-                if not self.is_short:
-                    entry_pnl_pct = (price - entry_price) / entry_price * 100
-                else:
-                    entry_pnl_pct = (entry_price - price) / entry_price * 100
-                if entry_pnl_pct >= BE_TRIGGER_PCT:
-                    if not self.is_short:
-                        be_sl = entry_price + be_offset
-                    else:
-                        be_sl = entry_price - be_offset
-                    # BE overrides trailing if tighter
-                    current_target = sl_updates.get(pid, cur_sl)
-                    if not self.is_short:
-                        if current_target == 0 or be_sl > current_target:
-                            sl_updates[pid] = be_sl
-                    else:
-                        if current_target == 0 or be_sl < current_target:
-                            sl_updates[pid] = be_sl
-                    entry["be_triggered"] = True
-                    print(f"[Remote] BREAK-EVEN pos {pid}: entry=${entry_price:.2f} "
-                          f"PnL={entry_pnl_pct:.2f}% >= {BE_TRIGGER_PCT}% SL=${be_sl:.2f}")
 
         # Batch amend SL for all entries that need update
         if sl_updates:
