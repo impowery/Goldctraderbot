@@ -640,9 +640,8 @@ class GoldMCPRemoteBot:
         enter, reason = should_enter(self.close_prices, self.high_prices, self.low_prices, today_high=self.today_high, today_low=self.today_low)
         if not enter:
             return
-        if self.adx > 0 and self.adx < 20:
-            print(f"[Remote] ADX {self.adx:.1f} < 20 — skip")
-            return
+        # Note: ADX check is done in should_enter() via ADX_THRESHOLD (configurable in .env, default 20)
+        # No separate hardcoded check here — was redundant and blocked entries when ADX_THRESHOLD < 20
 
         # 7b. Pullback filter: skip if price too far from EMA (buying high / selling low)
         if PULLBACK_MAX_MULT > 0 and self.atr > 0 and self.ema > 0:

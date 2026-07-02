@@ -16,6 +16,6 @@ LEVERAGE = 20
 STOP_LOSS_PIPS = 200
 TAKE_PROFIT_PIPS = 400
 MIN_INTERVAL_MINUTES = 60
-ADX_THRESHOLD = 25
+ADX_THRESHOLD = int(os.getenv("ADX_THRESHOLD", "20"))  # was 25, lowered to catch trends earlier
 ATR_PERIOD = 14
 EMA_PERIOD = int(os.getenv("EMA_PERIOD", "14"))  # was 20 (too slow, missed strong trends); 14 follows price faster
