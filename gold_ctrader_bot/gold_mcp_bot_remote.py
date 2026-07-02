@@ -737,8 +737,9 @@ class GoldMCPRemoteBot:
         Remote MCP docs: {fromTimestamp, toTimestamp} for ≤720h range query.
         """
         now = datetime.now(timezone.utc)
-        # 100 M5 candles ≈ 8.3 hours (API max), covers most of current trading session
-        from_dt = now - timedelta(hours=10)
+        # 100 M15 candles ≈ 25 hours. Need enough for EMA14 + ADX14 + ATR14 (min 42 candles).
+        # Was hours=10 for M5; changed to hours=30 for M15.
+        from_dt = now - timedelta(hours=30)
         from_iso = from_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         to_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         data = await self.call("get_trendbars", {
