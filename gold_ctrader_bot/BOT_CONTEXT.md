@@ -141,8 +141,8 @@ tail -f /root/bots/logs/gold_remote.log   # лог из файла
 | TIMEFRAME | M_15 | M_15 | таймфрейм свечей (был M_5, перешёл на M_15) |
 | CANDLE_COUNT | 100 | 60 | сколько свечей тянуть |
 | EMA_PERIOD | 14 | — | период EMA (был 20, стал 14 — быстрее) |
-| ENTRY_VOLUMES | 0.3,0.3,0.3 | 0.3 | объёмы входа (lots) |
-| MAX_ENTRIES | 3 | 1 | max scale-in entries |
+| ENTRY_VOLUMES | 0.7,0.5 | 0.3 | объёмы входа (lots), 2 входа одновременно |
+| MAX_ENTRIES | 2 | 1 | max entries (было 3 scale-in, стало 2 одновременно) |
 | SL_ATR_MULT | 3.0 | 2.0 | SL = N × ATR |
 | TP1_ATR_MULT | 3.0 | 1.0 | TP1 (close first position fully), был 1.5 |
 | TP2_ATR_MULT | 4.5 | 3.0 | TP2 (close entries with TP), был 4.0 |
@@ -438,6 +438,7 @@ systemctl restart gold-remote
 | 44 | ADX_THRESHOLD=25 (hardcoded) + дублирующая проверка `adx < 20` в основном коде — блокировали входы при ADX 20-25, бот пропускал тренды | `ADX_THRESHOLD=20` в `.env` (configurable), дублирующая проверка убрана |
 | 45 | **Trailing SL активировался при +0.4% — всё ещё слишком рано.** Peak +$19 (+0.47%), trailing подтянул SL с $4088 до $4111, цена развернулась → -$933. Без trailing SL остался бы на $4088, цена $4111 не задела бы | Trailing SL только **после BE** (0.5%): Stage 1 — SL initial, Stage 2 — BE → SL на entry, Stage 3 — после BE trailing следует за ценой |
 | 46 | **M5 таймфрейм — ATR слишком маленькая ($5-11), SL = $15-33.** Стопы сносило на откатах постоянно. Сегодня SL $4111, лой $4101 — $10 разницы | Перешёл на **M15**: ATR $12.89, SL = $38.67. В 2-3× шире, переживает откаты |
+| 47 | **TP1 закрывал позиции слишком рано — бот открывал новые по ХУДШЕЙ цене.** Сегодня: Entry $4149 → TP1 +$690, потом Entry $4176 → $0, Entry $4186 → open. Вместо +$2,052 если бы обе позиции открылись на $4149 | **2 входа одновременно**: Entry #1 (0.7 lot, TP) + Entry #2 (0.5 lot, без TP, rides trend). MAX_ENTRIES=2, ENTRY_VOLUMES=0.7,0.5 |
 
 ---
 
