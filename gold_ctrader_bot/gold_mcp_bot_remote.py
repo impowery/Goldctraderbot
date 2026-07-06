@@ -438,7 +438,7 @@ class GoldMCPRemoteBot:
 
         print(f"[Remote] Bot | {SYMBOL} | entries={ENTRY_VOLUMES} lots "
               f"| max={MAX_ENTRIES} | SL={SL_ATR_MULT}atr | TP1={TP1_ATR_MULT}atr TP2={TP2_ATR_MULT}atr | 2 entries at once")
-        print(f"[Remote] BE trigger={BE_TRIGGER_PCT}% | Time exit={TIME_EXIT_HOURS}h | Scale-in cooldown={SCALE_IN_COOLDOWN_SEC}s | Scale-in distance={SCALE_IN_DISTANCE_MULT}xATR")
+        print(f"[Remote] BE trigger={BE_TRIGGER_PCT}% | NO time exit | Scale-in cooldown={SCALE_IN_COOLDOWN_SEC}s | Scale-in distance={SCALE_IN_DISTANCE_MULT}xATR")
         print(f"[Remote] Pullback filter={PULLBACK_MAX_MULT}xATR | Consec loss pause={CONSEC_LOSS_COUNT}losses→{CONSEC_LOSS_PAUSE_SEC}s | Trend filter M30={TREND_FILTER_ENABLED}")
         print(f"[Remote] Trailing SL only after BE (+{BE_TRIGGER_PCT}%) | Cooldown max 60m")
 
@@ -1659,14 +1659,9 @@ class GoldMCPRemoteBot:
                     if can_scale and distance_ok and not_overextended:
                         await self.open_entry("sell" if self.is_short else "buy", price, balance)
 
-        # Time exit — applies to ALL entries (including no-TP entry that rides trend)
-        # Was: only when has_tp_entries. But after TP1 closes Entry #1, Entry #2 (no TP)
-        # would ride forever without time exit. Now: always check.
-        if self.entries:
-            hrs = (int(time.time() * 1000) - self.entry_time) / 3600000
-            if hrs >= TIME_EXIT_HOURS and abs(pnl_pct) < 1:
-                print(f"[Remote] Time exit ({hrs:.1f}h, PnL {pnl_pct:.2f}%)")
-                await self.close_all("TIME")
+        # Time exit REMOVED — user request 6 Jul. Was closing positions at 4h
+        # even in profit, causing unnecessary losses. Now: positions close only
+        # by TP1, TP2, SL, trailing SL (after BE), or daily loss limit.
 
     async def close_all(self, reason):
         entry_price = self.avg_price if self.entries else 0
