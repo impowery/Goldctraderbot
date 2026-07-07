@@ -100,7 +100,8 @@ def should_enter(close: list[float], high: list[float], low: list[float], today_
         if price < ema and range_pos < 0.05:
             return False, f"SHORT skip at {range_pos*100:.0f}% daily range"
 
+    # FLIPPED: price > EMA → SHORT (sell overextension), price < EMA → LONG (buy oversold)
     if price > ema:
-        return True, f"LONG ema={ema:.1f} adx={adx:.1f} atr={atr:.2f}"
-    else:
         return True, f"SHORT ema={ema:.1f} adx={adx:.1f} atr={atr:.2f}"
+    else:
+        return True, f"LONG ema={ema:.1f} adx={adx:.1f} atr={atr:.2f}"

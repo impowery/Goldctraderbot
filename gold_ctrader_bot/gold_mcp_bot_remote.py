@@ -661,28 +661,29 @@ class GoldMCPRemoteBot:
                 want_short = "SHORT" in reason
                 m30_rising = self.m30_ema > self.m30_ema_prev
                 m30_falling = self.m30_ema < self.m30_ema_prev
-                if want_long and m30_falling:
-                    print(f"[Remote] Trend filter: M30 EMA falling (${self.m30_ema_prev:.2f}→${self.m30_ema:.2f}) — skip LONG")
+                # FLIPPED: M30 rising → allow SHORT (sell overextension), skip LONG
+                #          M30 falling → allow LONG (buy oversold), skip SHORT
+                if want_long and m30_rising:
+                    print(f"[Remote] Trend filter FLIPPED: M30 EMA rising (${self.m30_ema_prev:.2f}→${self.m30_ema:.2f}) — skip LONG")
                     return
-                if want_short and m30_rising:
-                    print(f"[Remote] Trend filter: M30 EMA rising (${self.m30_ema_prev:.2f}→${self.m30_ema:.2f}) — skip SHORT")
+                if want_short and m30_falling:
+                    print(f"[Remote] Trend filter FLIPPED: M30 EMA falling (${self.m30_ema_prev:.2f}→${self.m30_ema:.2f}) — skip SHORT")
                     return
 
-        # 7d. Daily trend filter: don't trade against daily direction.
-        # If price > today's open → daily trend UP → only LONG allowed
-        # If price < today's open → daily trend DOWN → only SHORT allowed
-        # Fetch daily open every 30 min (H1 candle updates hourly)
+        # 7d. Daily trend filter — FLIPPED for mean reversion:
+        # price > open → day UP → SHORT allowed (sell overextension), skip LONG
+        # price < open → day DOWN → LONG allowed (buy oversold), skip SHORT
         if int(time.time()) - self.last_daily_open_fetch > 1800:
             await self.fetch_daily_open()
             self.last_daily_open_fetch = int(time.time())
         if self.today_open > 0:
             want_long = "LONG" in reason
             want_short = "SHORT" in reason
-            if price > self.today_open and want_short:
-                print(f"[Remote] Daily trend filter: price ${price:.2f} > open ${self.today_open:.2f} (UP) — skip SHORT")
+            if price > self.today_open and want_long:
+                print(f"[Remote] Daily trend FLIPPED: price ${price:.2f} > open ${self.today_open:.2f} (UP) — skip LONG, allow SHORT")
                 return
-            if price < self.today_open and want_long:
-                print(f"[Remote] Daily trend filter: price ${price:.2f} < open ${self.today_open:.2f} (DOWN) — skip LONG")
+            if price < self.today_open and want_short:
+                print(f"[Remote] Daily trend FLIPPED: price ${price:.2f} < open ${self.today_open:.2f} (DOWN) — skip SHORT, allow LONG")
                 return
 
         # 8. Open BOTH entries simultaneously (Variant A):
