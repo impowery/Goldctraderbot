@@ -464,13 +464,12 @@ systemctl restart gold-remote
 
 ## 16. Желательно (не срочно)
 
-- **Адаптивный переключатель тренд/боковик** (идея записана 8 июля, ждать команды пользователя):
-  - ADX < 25 → боковик → **mean reversion** (flip ON): цена > EMA → SHORT, цена < EMA → LONG
-  - ADX ≥ 25 → тренд → **momentum** (flip OFF): цена > EMA → LONG, цена < EMA → SHORT
-  - Фильтры (M30, daily open, pullback) тоже должны переключаться
-  - Сложность: средняя, ~2 часа работы + тестирование
-  - Польза: бот адаптируется к рынку, не сливает в тренде, зарабатывает в боковике
-  - **Статус: жду разрешения пользователя после теста plain flip (неделя до ~15 июля)**
+- **Адаптивный переключатель тренд/боковик — ВНЕДРЁН 9 июля (баг #52):**
+  - ADX < 25 → боковик → **mean reversion** (flip): цена > EMA → SHORT, цена < EMA → LONG
+  - ADX ≥ 25 → тренд → **momentum**: цена > EMA → LONG, цена < EMA → SHORT
+  - Фильтры (M30, daily open) тоже переключаются по режиму
+  - **GOLD**: strategy.py + gold_mcp_bot_remote.py — adaptive ✅
+  - **BTC**: strategy.py — adaptive (REVERSE_SIGNAL больше не используется, заменён на ADX switch) ✅
 - Остановить HL paper bots (освободит 20% CPU)
 - Telegram bot команды (/status, /trades, /pause)
 - EURUSD бот (EMA50, ADX20, SL1.5×ATR, TP2=5×ATR)
