@@ -440,7 +440,7 @@ class GoldMCPRemoteBot:
               f"| max={MAX_ENTRIES} | SL={SL_ATR_MULT}atr | TP1={TP1_ATR_MULT}atr TP2={TP2_ATR_MULT}atr | 2 entries at once")
         print(f"[Remote] BE trigger={BE_TRIGGER_PCT}% | NO time exit | Scale-in cooldown={SCALE_IN_COOLDOWN_SEC}s | Scale-in distance={SCALE_IN_DISTANCE_MULT}xATR")
         print(f"[Remote] Pullback filter={PULLBACK_MAX_MULT}xATR | Consec loss pause={CONSEC_LOSS_COUNT}losses→{CONSEC_LOSS_PAUSE_SEC}s | Trend filter M30={TREND_FILTER_ENABLED}")
-        print(f"[Remote] Trailing SL only after BE (+{BE_TRIGGER_PCT}%) | Cooldown max 60m")
+        print(f"[Remote] Trailing SL only after BE (+{BE_TRIGGER_PCT}%) | Cooldown max 60m | ADAPTIVE: ADX<25 reversion, ADX>=25 momentum")
 
         self._load_state()
 
@@ -651,9 +651,12 @@ class GoldMCPRemoteBot:
                 print(f"[Remote] Pullback filter: price {distance:.2f}xATR {direction} EMA (> {PULLBACK_MAX_MULT}xATR) — skip")
                 return
 
-        # 7c. Trend filter: check M30 EMA direction, skip counter-trend entries
+        # 7c. Trend filter — ADAPTIVE based on ADX
+        # ADX < 25 (sideways): M30 rising → skip LONG (allow SHORT), M30 falling → skip SHORT (allow LONG)
+        # ADX >= 25 (trend): M30 rising → skip SHORT (allow LONG), M30 falling → skip LONG (allow SHORT)
+        is_reversion = "reversion" in reason
+        is_momentum = "momentum" in reason
         if TREND_FILTER_ENABLED:
-            # Fetch M30 candles if not fetched yet or stale (>5 min old)
             if int(time.time()) - self.last_m30_fetch > 300:
                 await self.fetch_m30_candles()
             if self.m30_ema > 0 and self.m30_ema_prev > 0:
@@ -661,30 +664,46 @@ class GoldMCPRemoteBot:
                 want_short = "SHORT" in reason
                 m30_rising = self.m30_ema > self.m30_ema_prev
                 m30_falling = self.m30_ema < self.m30_ema_prev
-                # FLIPPED: M30 rising → allow SHORT (sell overextension), skip LONG
-                #          M30 falling → allow LONG (buy oversold), skip SHORT
-                if want_long and m30_rising:
-                    print(f"[Remote] Trend filter FLIPPED: M30 EMA rising (${self.m30_ema_prev:.2f}→${self.m30_ema:.2f}) — skip LONG")
-                    return
-                if want_short and m30_falling:
-                    print(f"[Remote] Trend filter FLIPPED: M30 EMA falling (${self.m30_ema_prev:.2f}→${self.m30_ema:.2f}) — skip SHORT")
-                    return
+                if is_reversion:
+                    # Mean reversion: M30 rising → skip LONG, M30 falling → skip SHORT
+                    if want_long and m30_rising:
+                        print(f"[Remote] M30 filter (reversion): EMA rising — skip LONG")
+                        return
+                    if want_short and m30_falling:
+                        print(f"[Remote] M30 filter (reversion): EMA falling — skip SHORT")
+                        return
+                elif is_momentum:
+                    # Momentum: M30 rising → skip SHORT, M30 falling → skip LONG
+                    if want_short and m30_rising:
+                        print(f"[Remote] M30 filter (momentum): EMA rising — skip SHORT")
+                        return
+                    if want_long and m30_falling:
+                        print(f"[Remote] M30 filter (momentum): EMA falling — skip LONG")
+                        return
 
-        # 7d. Daily trend filter — FLIPPED for mean reversion:
-        # price > open → day UP → SHORT allowed (sell overextension), skip LONG
-        # price < open → day DOWN → LONG allowed (buy oversold), skip SHORT
+        # 7d. Daily trend filter — ADAPTIVE
+        # Reversion: price > open → skip LONG (allow SHORT), price < open → skip SHORT (allow LONG)
+        # Momentum: price > open → skip SHORT (allow LONG), price < open → skip LONG (allow SHORT)
         if int(time.time()) - self.last_daily_open_fetch > 1800:
             await self.fetch_daily_open()
             self.last_daily_open_fetch = int(time.time())
         if self.today_open > 0:
             want_long = "LONG" in reason
             want_short = "SHORT" in reason
-            if price > self.today_open and want_long:
-                print(f"[Remote] Daily trend FLIPPED: price ${price:.2f} > open ${self.today_open:.2f} (UP) — skip LONG, allow SHORT")
-                return
-            if price < self.today_open and want_short:
-                print(f"[Remote] Daily trend FLIPPED: price ${price:.2f} < open ${self.today_open:.2f} (DOWN) — skip SHORT, allow LONG")
-                return
+            if is_reversion:
+                if price > self.today_open and want_long:
+                    print(f"[Remote] Daily filter (reversion): price > open — skip LONG")
+                    return
+                if price < self.today_open and want_short:
+                    print(f"[Remote] Daily filter (reversion): price < open — skip SHORT")
+                    return
+            elif is_momentum:
+                if price > self.today_open and want_short:
+                    print(f"[Remote] Daily filter (momentum): price > open — skip SHORT")
+                    return
+                if price < self.today_open and want_long:
+                    print(f"[Remote] Daily filter (momentum): price < open — skip LONG")
+                    return
 
         # 8. Open BOTH entries simultaneously (Variant A):
         #    Entry #1: with TP (TP1_ATR_MULT) — takes profit at target

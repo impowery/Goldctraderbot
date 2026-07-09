@@ -100,8 +100,24 @@ def should_enter(close: list[float], high: list[float], low: list[float], today_
         if price < ema and range_pos < 0.05:
             return False, f"SHORT skip at {range_pos*100:.0f}% daily range"
 
-    # FLIPPED: price > EMA → SHORT (sell overextension), price < EMA → LONG (buy oversold)
-    if price > ema:
-        return True, f"SHORT ema={ema:.1f} adx={adx:.1f} atr={atr:.2f}"
+    # ADAPTIVE SWITCHER: mode depends on ADX
+    # ADX < ADX_SWITCH_THRESHOLD (25) → sideways → mean reversion (flip)
+    #   price > EMA → SHORT (sell overextension)
+    #   price < EMA → LONG (buy oversold)
+    # ADX >= ADX_SWITCH_THRESHOLD (25) → trend → momentum
+    #   price > EMA → LONG (buy strength)
+    #   price < EMA → SHORT (sell weakness)
+    ADX_SWITCH = 25  # threshold for switching between mean reversion and momentum
+
+    if adx < ADX_SWITCH:
+        # SIDEWAYS — mean reversion (flip)
+        if price > ema:
+            return True, f"SHORT (reversion) ema={ema:.1f} adx={adx:.1f} atr={atr:.2f}"
+        else:
+            return True, f"LONG (reversion) ema={ema:.1f} adx={adx:.1f} atr={atr:.2f}"
     else:
-        return True, f"LONG ema={ema:.1f} adx={adx:.1f} atr={atr:.2f}"
+        # TREND — momentum
+        if price > ema:
+            return True, f"LONG (momentum) ema={ema:.1f} adx={adx:.1f} atr={atr:.2f}"
+        else:
+            return True, f"SHORT (momentum) ema={ema:.1f} adx={adx:.1f} atr={atr:.2f}"
