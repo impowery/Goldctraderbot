@@ -530,6 +530,9 @@ class GoldMCPRemoteBot:
                 self.daily_loss_hit = True
             if self.has_position:
                 await self.close_all("DAILY_LOSS")
+            # Log every 5 minutes so watchdog doesn't kill us + user sees we're alive
+            if now % 300000 < CHECK_INTERVAL * 1000:
+                print(f"[Remote] DAILY LOSS paused — waiting for new day (balance=${balance:.2f}, loss=${daily_pnl:.2f})")
             return
         today = datetime.now().strftime("%Y-%m-%d")
         if self.daily_pnl_day != today:
