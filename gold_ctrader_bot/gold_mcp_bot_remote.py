@@ -550,6 +550,16 @@ class GoldMCPRemoteBot:
         if not DRY_RUN:
             await self.sync_position()
 
+        # 3.4 Friday close — close all positions at 23:40 MSK (20:40 UTC) to avoid weekend gap
+        now_msk = datetime.now(MSK)
+        if "BTC" not in SYMBOL and now_msk.weekday() == 4:  # Friday
+            hour_min_msk = now_msk.hour * 60 + now_msk.minute
+            if hour_min_msk >= 23 * 60 + 40:  # 23:40 MSK
+                if self.has_position:
+                    print(f"[Remote] FRIDAY CLOSE: {now_msk.strftime('%H:%M')} MSK — closing all positions before weekend")
+                    await self.close_all("FRIDAY_CLOSE")
+                return
+
         # 3.5 Market hours check — skip trading when market closed
         market_open = is_market_open()
         if not market_open:
