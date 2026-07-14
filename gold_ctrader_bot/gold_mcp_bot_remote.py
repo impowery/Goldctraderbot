@@ -44,6 +44,7 @@ import httpx
 from dotenv import load_dotenv
 
 from strategy import should_enter, calc_ema, calc_atr, calc_adx
+from news_filter import is_news_blackout
 
 load_dotenv()
 
@@ -647,6 +648,12 @@ class GoldMCPRemoteBot:
                     self._consec_pause_until = 0
                     self._save_state()
         if now - self.entry_time < MIN_INTERVAL_MINUTES * 60 * 1000 and self.entry_time > 0:
+            return
+
+        # 6.5 News filter — no trading 15 min before/after high-impact USD events
+        news_blocked, news_msg = is_news_blackout()
+        if news_blocked:
+            print(f"[Remote] {news_msg} — skip trading")
             return
 
         # 7. Strategy signal
