@@ -465,10 +465,12 @@ systemctl restart gold-remote
 ## 16. История стратегий
 
 ### Стратегия v3: RSI + Stochastic (15 июля 2026, баг #56)
+
+**Обновление 15 июля 19:30 MSK:** RSI пороги смягчены 20/80 → **25/75** (по запросу пользователя). Stochastic 20/80 без изменений. Причина: при 20/80 за 5 часов 0 входов (RSI за день не выходил ниже 36 и выше 79). С 25/75 ожидается 1-3 входа в день.
 - **Файлы:** `strategy_rsi.py` (новая), `gold_mcp_bot_remote.py` (переписан)
 - **Старая стратегия:** `strategy_old_ema.py` + `gold_mcp_bot_remote_old_ema.py` (бэкап на VPS)
-- **Вход LONG:** RSI(14) < 20 AND Stochastic %K < 20 (M30 EMA41 rising/flat)
-- **Вход SHORT:** RSI(14) > 80 AND Stochastic %K > 80 (M30 EMA41 falling/flat)
+- **Вход LONG:** RSI(14) < 25 AND Stochastic %K < 20 (M30 EMA41 rising/flat)  *(порог RSI понижен с 20 до 25, 15 июля 19:30)*
+- **Вход SHORT:** RSI(14) > 75 AND Stochastic %K > 80 (M30 EMA41 falling/flat)  *(порог RSI повышен с 80 до 75, 15 июля 19:30)*
 - **Выход:** RSI пересекает 50 (середина)
 - **SL/TP:** Фиксированные $25/$35 (не ATR)
 - **Объём:** 0.3 lot, один вход (без scale-in)
