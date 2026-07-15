@@ -462,7 +462,30 @@ systemctl restart gold-remote
 
 ---
 
-## 16. Желательно (не срочно)
+## 16. История стратегий
+
+### Стратегия v3: RSI + Stochastic (15 июля 2026, баг #56)
+- **Файлы:** `strategy_rsi.py` (новая), `gold_mcp_bot_remote.py` (переписан)
+- **Старая стратегия:** `strategy_old_ema.py` + `gold_mcp_bot_remote_old_ema.py` (бэкап на VPS)
+- **Вход LONG:** RSI(14) < 20 AND Stochastic %K < 20 (M30 EMA41 rising/flat)
+- **Вход SHORT:** RSI(14) > 80 AND Stochastic %K > 80 (M30 EMA41 falling/flat)
+- **Выход:** RSI пересекает 50 (середина)
+- **SL/TP:** Фиксированные $25/$35 (не ATR)
+- **Объём:** 0.3 lot, один вход (без scale-in)
+- **Max сделок:** 3 в день
+- **Таймфрейм:** M15
+- **Фильтры:** News filter ±15 мин, Friday close 23:40, daily loss 2.5%
+- **M30 EMA41:** только для определения тренда, не для входа
+
+### Стратегия v2: Adaptive (flip) (9-14 июля 2026, баги #51-55)
+- EMA+ADX с переключением reversion/momentum по ADX
+- Результат: -$13,108 (слив)
+- Причина: EMA запаздывает, покупает на хаях, продаёт на лоях
+
+### Стратегия v1: EMA+ADX momentum (26 июня - 8 июля 2026, баги #1-50)
+- EMA20→14 + ADX + ATR на M5→M15
+- Результат: -$5,328 (слив)
+- Причина: та же — momentum входит на экстремумах
 
 - **Адаптивный переключатель тренд/боковик — ВНЕДРЁН 9 июля (баг #52):**
   - ADX < 25 → боковик → **mean reversion** (flip): цена > EMA → SHORT, цена < EMA → LONG
