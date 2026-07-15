@@ -43,7 +43,8 @@ if sys.platform == "win32":
 import httpx
 from dotenv import load_dotenv
 
-from strategy import should_enter, calc_ema, calc_atr, calc_adx
+from strategy_rsi import should_enter, calc_rsi, calc_stochastic, calc_ema, should_exit_rsi
+from strategy import calc_atr, calc_adx
 from news_filter import is_news_blackout
 
 load_dotenv()
@@ -52,7 +53,15 @@ load_dotenv()
 MCP_URL = os.getenv("MCP_URL", "https://mcp.ctrader.com/trading/mcp")
 MCP_BEARER_TOKEN = os.getenv("MCP_BEARER_TOKEN", "")
 
-# === Strategy config (identical to gold_mcp_bot.py) ===
+# === RSI Strategy config ===
+FIXED_SL_USD = float(os.getenv("FIXED_SL_USD", "25"))
+FIXED_TP_USD = float(os.getenv("FIXED_TP_USD", "35"))
+RSI_OVERSOLD = float(os.getenv("RSI_OVERSOLD", "20"))
+RSI_OVERBOUGHT = float(os.getenv("RSI_OVERBOUGHT", "80"))
+STOCH_OVERSOLD = float(os.getenv("STOCH_OVERSOLD", "20"))
+STOCH_OVERBOUGHT = float(os.getenv("STOCH_OVERBOUGHT", "80"))
+RSI_EXIT = float(os.getenv("RSI_EXIT", "50"))
+MAX_DAILY_TRADES = int(os.getenv("MAX_DAILY_TRADES", "3"))
 SYMBOL = os.getenv("SYMBOL_NAME", "XAUUSD")
 MIN_INTERVAL_MINUTES = int(os.getenv("MIN_INTERVAL_MINUTES", "60"))
 MAX_DAILY_LOSS_PERCENT = float(os.getenv("MAX_LOSS_PERCENT", "3.0"))
@@ -437,11 +446,9 @@ class GoldMCPRemoteBot:
         if not ok:
             await self.reconnect()
 
-        print(f"[Remote] Bot | {SYMBOL} | entries={ENTRY_VOLUMES} lots "
-              f"| max={MAX_ENTRIES} | SL={SL_ATR_MULT}atr | TP1={TP1_ATR_MULT}atr TP2={TP2_ATR_MULT}atr | 2 entries at once")
-        print(f"[Remote] BE trigger={BE_TRIGGER_PCT}% | NO time exit | Scale-in cooldown={SCALE_IN_COOLDOWN_SEC}s | Scale-in distance={SCALE_IN_DISTANCE_MULT}xATR")
-        print(f"[Remote] Pullback filter={PULLBACK_MAX_MULT}xATR | Consec loss pause={CONSEC_LOSS_COUNT}losses→{CONSEC_LOSS_PAUSE_SEC}s | Trend filter M30={TREND_FILTER_ENABLED}")
-        print(f"[Remote] Trailing SL only after BE (+{BE_TRIGGER_PCT}%) | Cooldown max 60m | ADAPTIVE: ADX<25 reversion, ADX>=25 momentum")
+        print(f"[Remote] Bot | {SYMBOL} | RSI strategy | vol={ENTRY_VOLUMES} | SL=${FIXED_SL_USD} TP=${FIXED_TP_USD}")
+        print(f"[Remote] RSI oversold={RSI_OVERSOLD} overbought={RSI_OVERBOUGHT} exit={RSI_EXIT} | Stoch {STOCH_OVERSOLD}/{STOCH_OVERBOUGHT}")
+        print(f"[Remote] Max {MAX_DAILY_TRADES} trades/day | M30 EMA41 trend filter | News filter | Friday close 23:40")
 
         self._load_state()
 
@@ -656,84 +663,41 @@ class GoldMCPRemoteBot:
             print(f"[Remote] {news_msg} — skip trading")
             return
 
-        # 7. Strategy signal
-        enter, reason = should_enter(self.close_prices, self.high_prices, self.low_prices, today_high=self.today_high, today_low=self.today_low)
-        if not enter:
+        # 6.6 Max daily trades
+        today_str = datetime.now(MSK).strftime("%Y-%m-%d")
+        if not hasattr(self, 'daily_trade_count'):
+            self.daily_trade_count = {}
+            self.daily_trade_date = today_str
+        if self.daily_trade_date != today_str:
+            self.daily_trade_count = {}
+            self.daily_trade_date = today_str
+        trades_today = self.daily_trade_count.get(today_str, 0)
+        if trades_today >= MAX_DAILY_TRADES:
+            if now % 300000 < CHECK_INTERVAL * 1000:
+                print(f"[Remote] Max daily trades ({MAX_DAILY_TRADES}) reached — waiting for new day")
             return
-        # Note: ADX check is done in should_enter() via ADX_THRESHOLD (configurable in .env, default 20)
-        # No separate hardcoded check here — was redundant and blocked entries when ADX_THRESHOLD < 20
 
-        # 7b. Pullback filter: skip if price too far from EMA (buying high / selling low)
-        if PULLBACK_MAX_MULT > 0 and self.atr > 0 and self.ema > 0:
-            distance = abs(price - self.ema) / self.atr
-            if distance > PULLBACK_MAX_MULT:
-                direction = "above" if price > self.ema else "below"
-                print(f"[Remote] Pullback filter: price {distance:.2f}xATR {direction} EMA (> {PULLBACK_MAX_MULT}xATR) — skip")
-                return
+        # 7. RSI Strategy signal
+        # Fetch M30 for trend filter
+        if int(time.time()) - self.last_m30_fetch > 300:
+            await self.fetch_m30_candles()
+        enter, reason, rsi_val, stoch_val = should_enter(
+            self.close_prices, self.high_prices, self.low_prices,
+            today_high=self.today_high, today_low=self.today_low,
+            m30_ema=self.m30_ema, m30_ema_prev=self.m30_ema_prev,
+            rsi_oversold=RSI_OVERSOLD, rsi_overbought=RSI_OVERBOUGHT,
+            stoch_oversold=STOCH_OVERSOLD, stoch_overbought=STOCH_OVERBOUGHT
+        )
+        if not enter:
+            if now % 60000 < CHECK_INTERVAL * 1000:
+                print(f"[Remote] {reason} | price=${price:.2f}")
+            return
 
-        # 7c. Trend filter — ADAPTIVE based on ADX
-        # ADX < 25 (sideways): M30 rising → skip LONG (allow SHORT), M30 falling → skip SHORT (allow LONG)
-        # ADX >= 25 (trend): M30 rising → skip SHORT (allow LONG), M30 falling → skip LONG (allow SHORT)
-        is_reversion = "reversion" in reason
-        is_momentum = "momentum" in reason
-        if TREND_FILTER_ENABLED:
-            if int(time.time()) - self.last_m30_fetch > 300:
-                await self.fetch_m30_candles()
-            if self.m30_ema > 0 and self.m30_ema_prev > 0:
-                want_long = "LONG" in reason
-                want_short = "SHORT" in reason
-                m30_rising = self.m30_ema > self.m30_ema_prev
-                m30_falling = self.m30_ema < self.m30_ema_prev
-                if is_reversion:
-                    # Mean reversion: M30 rising → skip LONG, M30 falling → skip SHORT
-                    if want_long and m30_rising:
-                        print(f"[Remote] M30 filter (reversion): EMA rising — skip LONG")
-                        return
-                    if want_short and m30_falling:
-                        print(f"[Remote] M30 filter (reversion): EMA falling — skip SHORT")
-                        return
-                elif is_momentum:
-                    # Momentum: M30 rising → skip SHORT, M30 falling → skip LONG
-                    if want_short and m30_rising:
-                        print(f"[Remote] M30 filter (momentum): EMA rising — skip SHORT")
-                        return
-                    if want_long and m30_falling:
-                        print(f"[Remote] M30 filter (momentum): EMA falling — skip LONG")
-                        return
-
-        # 7d. Daily trend filter — ADAPTIVE
-        # Reversion: price > open → skip LONG (allow SHORT), price < open → skip SHORT (allow LONG)
-        # Momentum: price > open → skip SHORT (allow LONG), price < open → skip LONG (allow SHORT)
-        if int(time.time()) - self.last_daily_open_fetch > 1800:
-            await self.fetch_daily_open()
-            self.last_daily_open_fetch = int(time.time())
-        if self.today_open > 0:
-            want_long = "LONG" in reason
-            want_short = "SHORT" in reason
-            if is_reversion:
-                if price > self.today_open and want_long:
-                    print(f"[Remote] Daily filter (reversion): price > open — skip LONG")
-                    return
-                if price < self.today_open and want_short:
-                    print(f"[Remote] Daily filter (reversion): price < open — skip SHORT")
-                    return
-            elif is_momentum:
-                if price > self.today_open and want_short:
-                    print(f"[Remote] Daily filter (momentum): price > open — skip SHORT")
-                    return
-                if price < self.today_open and want_long:
-                    print(f"[Remote] Daily filter (momentum): price < open — skip LONG")
-                    return
-
-        # 8. Open BOTH entries simultaneously (Variant A):
-        #    Entry #1: with TP (TP1_ATR_MULT) — takes profit at target
-        #    Entry #2: without TP — rides trend with trailing SL (after BE)
-        #    No scale-in needed — both open at once, no missed trends.
+        # 8. Single entry — full volume
         side = "sell" if "SHORT" in reason else "buy"
+        print(f"[Remote] SIGNAL: {reason} — opening {side.upper()} {ENTRY_VOLUMES} lot")
         await self.open_entry(side, price, balance)
-        # Immediately open second entry (last entry = no TP, rides trend)
-        if len(self.entries) < MAX_ENTRIES:
-            await self.open_entry(side, price, balance)
+        self.daily_trade_count[today_str] = trades_today + 1
 
     # ─── Remote MCP tool wrappers ──────────────────────────────────
 
@@ -1447,100 +1411,48 @@ class GoldMCPRemoteBot:
     # ─── Entry management ──────────────────────────────────────────
 
     async def open_entry(self, side, price, balance):
-        # Always update last_scale_in_time on ANY entry (first or scale-in)
-        # to enforce cooldown before the next entry. Previously only set on scale-in,
-        # which allowed an immediate 2nd entry within seconds of the 1st (cooldown bypass).
+        """Single entry with fixed SL/TP. No scale-in, no last-entry logic."""
         self.last_scale_in_time = int(time.time() * 1000)
-        if not self.entries:
-            self.is_short = side == "sell"
-            self.entry_time = int(time.time() * 1000)
-            self.extreme_price = price
-            self.entry_atr = self.atr
-            self.entry_ema = self.ema
-            self.closed_half = False
-            self.entries = []
-        else:
-            # Scale-in: preserve extreme_price and current_sl, do NOT reset them
-            pass
+        self.is_short = side == "sell"
+        self.entry_time = int(time.time() * 1000)
+        self.extreme_price = price
+        self.closed_half = False
+        self.entries = []
 
-        entry_idx = len(self.entries)
-        if entry_idx >= MAX_ENTRIES:
-            print(f"[Remote] Max entries ({MAX_ENTRIES}) reached")
-            return
+        vol = ENTRY_VOLUMES if isinstance(ENTRY_VOLUMES, (int, float)) else ENTRY_VOLUMES[0]
+        print(f"[Remote] Entry: {side.upper()} {vol} lots @ ${price:.2f}")
 
-        vol = self.entry_volume(entry_idx)
-        print(f"[Remote] Entry #{entry_idx + 1}: {side.upper()} {vol} lots @ ${price:.2f}")
-
-        # Every entry gets SL; last entry gets NO TP (ride the trend)
-        atr_for_sl = self.atr if self.atr > 0 else (self.entry_atr if self.entry_atr > 0 else 10)
-        is_last_entry = (entry_idx == MAX_ENTRIES - 1)
+        # Fixed SL/TP in USD (not ATR-based)
         if not self.is_short:
-            sl_price = price - atr_for_sl * SL_ATR_MULT
-            tp_price = price + atr_for_sl * TP2_ATR_MULT
+            sl_price = price - FIXED_SL_USD
+            tp_price = price + FIXED_TP_USD
         else:
-            sl_price = price + atr_for_sl * SL_ATR_MULT
-            tp_price = price - atr_for_sl * TP2_ATR_MULT
+            sl_price = price + FIXED_SL_USD
+            tp_price = price - FIXED_TP_USD
 
-        # Last entry: no TP — ride the trend with trailing SL only
-        if is_last_entry:
-            print(f"[Remote] Last entry — no TP, riding trend with trailing SL")
-            order = await self.place_market_order(side, vol, sl_price, None)
-        else:
-            order = await self.place_market_order(side, vol, sl_price, tp_price)
+        order = await self.place_market_order(side, vol, sl_price, tp_price)
 
         if order:
             position_id = None
             if isinstance(order, dict) and not order.get("dry_run"):
                 position_id = order.get("positionId") or order.get("position_id")
-            # Store tp_price=0 for last entry (no TP, rides trend)
-            stored_tp = tp_price if not is_last_entry else 0
-            # Each entry has its OWN extreme_price (init = entry price) for independent trailing SL.
-            # This prevents all stops from clustering at one level (market-maker stop-hunt target).
             self.entries.append({"price": price, "volume_lots": vol, "position_id": position_id,
-                                 "tp_price": stored_tp, "sl_price": sl_price,
+                                 "tp_price": tp_price, "sl_price": sl_price,
                                  "extreme_price": price, "be_triggered": False})
+            self.current_sl = sl_price
             self.last_entry_minute = datetime.now().minute
-            tp_str = f"${tp_price:.2f}" if not is_last_entry else "NONE (ride trend)"
-            print(f"[Remote] Entry #{entry_idx + 1} done | avg={self.avg_price:.2f} vol={self.total_volume:.2f} "
-                  f"pos_id={position_id} SL=${sl_price:.2f} TP={tp_str}")
+            print(f"[Remote] Entry done | vol={vol} pos_id={position_id} SL=${sl_price:.2f} TP=${tp_price:.2f}")
             await asyncio.sleep(2)
-            # Check if TP/SL were actually set, amend if not
+            # Amend if TP/SL not set
             if position_id and not DRY_RUN:
                 pos = order.get("position", {}) if isinstance(order, dict) else {}
-                actual_tp = pos.get("takeProfit")
-                actual_sl = pos.get("stopLoss")
-                needs_amend = False
-                if not actual_tp or actual_tp == 0:
-                    if not is_last_entry and (not actual_tp or actual_tp == 0):
-                        print(f"[Remote] TP missing ??? will amend to ${tp_price:.3f}")
-                        needs_amend = True
-                    elif is_last_entry and (not actual_tp or actual_tp == 0):
-                        # Last entry should NOT have TP — ride trend with trailing SL only.
-                        # Do NOT set needs_amend here (was a bug: TP was being added to last entry).
-                        print(f"[Remote] Last entry ??? TP skipped intentionally, trailing SL only")
-                if not actual_sl or actual_sl == 0:
-                    print(f"[Remote] SL missing — will amend to ${sl_price:.3f}")
-                    needs_amend = True
-                if needs_amend:
-                    # For last entry, pass take_profit=None so cTrader does NOT add TP
-                    amend_tp = tp_price if not is_last_entry else None
-                    await self.amend_position(position_id, stop_loss=sl_price, take_profit=amend_tp)
-                    tp_log = f"${tp_price:.3f}" if not is_last_entry else "NONE (ride trend)"
-                    print(f"[Remote] Amended SL=${sl_price:.3f} TP={tp_log} on pos {position_id}")
-            # Set initial current_sl ??? only if higher (LONG) or lower (SHORT) than existing
-            if not self.entries or len(self.entries) <= 1:
-                self.current_sl = sl_price
-            elif self.is_short:
-                if sl_price < self.current_sl:
-                    self.current_sl = sl_price
-            else:
-                if sl_price > self.current_sl:
-                    self.current_sl = sl_price
-            print(f"[Remote] Initial SL set: ${self.current_sl:.2f}")
+                if not pos.get("takeProfit") or pos.get("takeProfit") == 0:
+                    await self.amend_position(position_id, stop_loss=sl_price, take_profit=tp_price)
+                    print(f"[Remote] Amended SL=${sl_price:.3f} TP=${tp_price:.3f} on pos {position_id}")
             if not DRY_RUN:
                 await self.sync_position_ids()
         else:
-            print(f"[Remote] Entry #{entry_idx + 1} failed")
+            print(f"[Remote] Entry failed")
 
     async def manage_position(self, price, balance=0):
         if not self.has_position:
@@ -1550,158 +1462,16 @@ class GoldMCPRemoteBot:
         if not all(e.get("position_id") for e in self.entries) and not DRY_RUN:
             await self.sync_position_ids()
 
-        # ─── Per-entry Trailing SL + Break-even ───────────────────────────
-        # Each entry has its OWN extreme_price and sl_price, so stops don't cluster.
-        # Loop over all entries, compute new SL per entry, batch amend once.
-        sl_updates = {}  # {position_id: new_sl_price}
-        atr_for_sl = self.atr if self.atr > 0 else (self.entry_atr if self.entry_atr > 0 else 5)
-        td = atr_for_sl * SL_ATR_MULT
-        be_offset = atr_for_sl * BE_OFFSET_ATR
-
-        for entry in self.entries:
-            pid = entry.get("position_id")
-            if not pid:
-                continue
-            entry_price = entry.get("price", 0)
-            if entry_price <= 0:
-                continue
-            # Init extreme_price if missing (backward compat with old state)
-            if entry.get("extreme_price", 0) == 0:
-                entry["extreme_price"] = entry_price
-            extreme = entry["extreme_price"]
-            cur_sl = entry.get("sl_price", 0)
-            be_done = entry.get("be_triggered", False)
-
-            # ─── Two-stage SL protection: BE first, then trailing ──────────
-            # Stage 1: SL stays at initial (entry - 3*ATR) — no movement
-            # Stage 2: When PnL >= BE_TRIGGER_PCT (0.5%), move SL to entry (break-even)
-            # Stage 3: After BE, trailing SL activates — follows extreme_price - 3*ATR
-            #
-            # This prevents stop-hunts: price slightly up → SL tightens → price reverses → SL hit.
-            # Trailing only protects REAL profit (after BE).
-
-            # Break-even: per entry, when THIS entry's PnL >= BE_TRIGGER_PCT
-            if not be_done:
-                if not self.is_short:
-                    entry_pnl_pct = (price - entry_price) / entry_price * 100
-                else:
-                    entry_pnl_pct = (entry_price - price) / entry_price * 100
-                if entry_pnl_pct >= BE_TRIGGER_PCT:
-                    if not self.is_short:
-                        be_sl = entry_price + be_offset
-                    else:
-                        be_sl = entry_price - be_offset
-                    # BE overrides initial SL if tighter
-                    if not self.is_short:
-                        if cur_sl == 0 or be_sl > cur_sl:
-                            sl_updates[pid] = be_sl
-                    else:
-                        if cur_sl == 0 or be_sl < cur_sl:
-                            sl_updates[pid] = be_sl
-                    entry["be_triggered"] = True
-                    print(f"[Remote] BREAK-EVEN pos {pid}: entry=${entry_price:.2f} "
-                          f"PnL={entry_pnl_pct:.2f}% >= {BE_TRIGGER_PCT}% SL=${be_sl:.2f}")
-
-            # Trailing SL: ONLY active after BE has triggered (be_done = True)
-            if be_done:
-                if not self.is_short:
-                    if price > extreme:
-                        entry["extreme_price"] = price
-                        extreme = price
-                    new_sl = extreme - td
-                    # Only move SL UP for LONG (tighter); skip if no improvement
-                    if cur_sl == 0 or new_sl > cur_sl:
-                        sl_updates[pid] = new_sl
-                else:
-                    if price < extreme:
-                        entry["extreme_price"] = price
-                        extreme = price
-                    new_sl = extreme + td
-                    # Only move SL DOWN for SHORT (tighter); skip if no improvement
-                    if cur_sl == 0 or new_sl < cur_sl:
-                        sl_updates[pid] = new_sl
-
-        # Batch amend SL for all entries that need update
-        if sl_updates:
-            await self.amend_sl_per_position(sl_updates)
-
-        # Aggregate PnL% (for time exit)
-        pnl_pct = self.get_current_pnl_pct(price)
-
-        # TP1: close first position fully (Hedged mode — each position is separate)
-        tp1_price = self.get_tp1_price(price)
-        if not self.closed_half:
-            hit = (not self.is_short and price >= tp1_price) or (self.is_short and price <= tp1_price)
-            if hit:
-                print(f"[Remote] TP1 hit @ ${price:.2f} — closing first position")
-                if not DRY_RUN:
-                    # Close first position fully (can't close 50% across positions in Hedged mode)
-                    if self.entries:
-                        first_pid = self.entries[0].get("position_id")
-                        first_vol = self.entries[0].get("volume_lots", 0)
-                        if first_pid:
-                            await self.close_position_partial(first_pid, first_vol)
-                            print(f"[Remote] Closed pos {first_pid} ({first_vol} lots)")
-                self.closed_half = True
-                self._write_trade("TP1", self.avg_price, price, 0, len(self.entries))
-                self._save_state()
+        # RSI EXIT — close when RSI crosses back to 50
+        if len(self.close_prices) >= 15:
+            if should_exit_rsi(self.close_prices, self.is_short, RSI_EXIT):
+                rsi = calc_rsi(self.close_prices, 14)
+                print(f"[Remote] RSI EXIT: rsi={rsi:.1f} crossed {RSI_EXIT} — closing position")
+                await self.close_all("RSI_EXIT")
                 return
 
-        # TP2: close entries that HAVE TP (not the last entry which rides the trend)
-        tp2_price = self.get_tp2_price(price)
-        hit_tp = (not self.is_short and price >= tp2_price) or (self.is_short and price <= tp2_price)
-        if hit_tp:
-            # Close entries with tp_price > 0, keep entries without TP (last entry)
-            entries_with_tp = [e for e in self.entries if e.get("tp_price", 0) > 0]
-            entries_without_tp = [e for e in self.entries if e.get("tp_price", 0) <= 0]
-            if entries_with_tp:
-                print(f"[Remote] TP2 hit @ ${price:.2f} — closing {len(entries_with_tp)} entries with TP")
-                if not DRY_RUN:
-                    for entry in entries_with_tp:
-                        pid = entry.get("position_id")
-                        vol = entry.get("volume_lots", 0)
-                        if pid:
-                            await self.close_position_partial(pid, vol)
-                            print(f"[Remote] Closed pos {pid} ({vol} lots)")
-                self._write_trade("TP2", self.avg_price, price, 0, len(entries_with_tp))
-                self.entries = entries_without_tp  # keep only last entry (no TP)
-                self._save_state()
-                if not self.entries:
-                    # No entries left — all closed
-                    self.has_position = False
-                    self.closed_half = False
-                    self.current_sl = 0.0
-                    self.extreme_price = 0.0
-                    self.last_scale_in_time = 0
-                    self._save_state()
-                    return
-                print(f"[Remote] {len(self.entries)} entry(ies) remaining — riding trend")
-            return
-
-        # Scale-in with cooldown
-        # Use configurable SCALE_IN_COOLDOWN_SEC (loaded from .env, default 300s = 5 min)
-        if len(self.entries) < MAX_ENTRIES and not self.closed_half:
-            now_ms = int(time.time() * 1000)
-            if self.last_scale_in_time > 0:
-                time_since_last_scale = (now_ms - self.last_scale_in_time) / 1000
-            else:
-                # No previous entry recorded — block scale-in until at least one full cooldown
-                # has elapsed since entry_time. Fixes the old bug where last_scale_in_time=0
-                # made time_since_last_scale=999 and bypassed cooldown entirely.
-                time_since_last_scale = (now_ms - self.entry_time) / 1000 if self.entry_time > 0 else 0
-            if time_since_last_scale >= SCALE_IN_COOLDOWN_SEC:
-                pnl_pct = self.get_current_pnl_pct(price)
-                if pnl_pct > -0.5:
-                    distance_ok = abs(price - avg) >= SCALE_IN_DISTANCE_MULT * self.atr
-                    not_overextended = abs(price - self.ema) < 1.5 * self.atr
-                    can_scale = (self.is_short and price >= self.ema and price > avg) or \
-                                (not self.is_short and price <= self.ema and price < avg)
-                    if can_scale and distance_ok and not_overextended:
-                        await self.open_entry("sell" if self.is_short else "buy", price, balance)
-
-        # Time exit REMOVED — user request 6 Jul. Was closing positions at 4h
-        # even in profit, causing unnecessary losses. Now: positions close only
-        # by TP1, TP2, SL, trailing SL (after BE), or daily loss limit.
+        # Fixed SL/TP handled by cTrader (set at entry). No trailing, no BE.
+        # Just sync positions to detect external closes (SL/TP hit by broker).
 
     async def close_all(self, reason):
         entry_price = self.avg_price if self.entries else 0
