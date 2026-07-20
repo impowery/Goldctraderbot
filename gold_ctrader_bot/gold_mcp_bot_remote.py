@@ -72,8 +72,8 @@ COOLDOWN_AFTER_SL = int(os.getenv("COOLDOWN_AFTER_SL", "0"))
 RECONNECT_DELAY = int(os.getenv("RECONNECT_DELAY", "5"))
 MAX_RECONNECT_DELAY = int(os.getenv("MAX_RECONNECT_DELAY", "300"))
 
-ENTRY_VOLUMES = [float(x) for x in os.getenv("ENTRY_VOLUMES", "0.01,0.01,0.01").split(",")]
-MAX_ENTRIES = int(os.getenv("MAX_ENTRIES", "3"))
+ENTRY_VOLUMES = [float(x) for x in os.getenv("ENTRY_VOLUMES", "0.7").split(",")]
+MAX_ENTRIES = int(os.getenv("MAX_ENTRIES", "1"))
 SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "2.0"))
 TP1_ATR_MULT = float(os.getenv("TP1_ATR_MULT", "1.5"))
 TP2_ATR_MULT = float(os.getenv("TP2_ATR_MULT", "4.0"))
@@ -256,6 +256,10 @@ class GoldMCPRemoteBot:
 
         # Current balance (updated each tick from cTrader)
         self.current_balance = 0.0
+
+        # Balance snapshot at position open — used for accurate per-trade PnL
+        # (fixes bug where total_pnl included historical losses)
+        self.balance_at_position_open = 0.0
 
         # VPS sync state
         self.last_state_push = 0
@@ -1194,6 +1198,7 @@ class GoldMCPRemoteBot:
                  "target_hit": self.target_hit, "sl_cooldown_until": self.sl_cooldown_until, "consecutive_losses": self.consecutive_losses, "current_sl": self.current_sl,
                  "initial_balance": self.initial_balance,
                  "last_scale_in_time": self.last_scale_in_time,
+            "balance_at_position_open": self.balance_at_position_open,
                  "consec_pause_until": self._consec_pause_until}
         tmp = STATE_FILE_PATH + ".tmp"
         try:
@@ -1231,6 +1236,7 @@ class GoldMCPRemoteBot:
             self.current_sl = state.get("current_sl", 0.0)
             self.initial_balance = state.get("initial_balance")
             self.last_scale_in_time = state.get("last_scale_in_time", 0)
+            self.balance_at_position_open = state.get("balance_at_position_open", 0.0)
             self._consec_pause_until = state.get("consec_pause_until", 0)
             # Load recent trades from trade log file (for consecutive loss pause)
             self.recent_trades = self._load_recent_trades(10)
@@ -1255,13 +1261,25 @@ class GoldMCPRemoteBot:
             print(f"[Remote] Position closed externally — recording trade")
             entry_price = self.avg_price if self.entries else 0
             entries_used = len(self.entries)
+            total_vol_lots = sum(e.get("volume_lots", 0) for e in self.entries) if self.entries else 0
             exit_price = self.close_prices[-1] if self.close_prices else 0
             bal_now = await self.get_balance_raw()
-            if bal_now and self.daily_start_balance:
-                bal_val = bal_now.get("balance", 0)
-                pnl = bal_val - self.daily_start_balance - self.total_pnl
+            bal_val = bal_now.get("balance", 0) if bal_now else 0
+            # Fixed PnL calc (bug #57, 2026-07-20):
+            # Primary: use balance snapshot at position open (includes commissions)
+            # Fallback: compute from entry/exit prices * volume * lot_size
+            if self.balance_at_position_open > 0:
+                pnl = bal_val - self.balance_at_position_open
+                print(f"[Remote] PnL calc: ${bal_val:.2f} - ${self.balance_at_position_open:.2f} (snapshot)")
+            elif entry_price > 0 and exit_price > 0 and total_vol_lots > 0:
+                if self.is_short:
+                    pnl = (entry_price - exit_price) * total_vol_lots * self.lot_size
+                else:
+                    pnl = (exit_price - entry_price) * total_vol_lots * self.lot_size
+                print(f"[Remote] PnL calc: price-based fallback (entry=${entry_price:.2f} exit=${exit_price:.2f} vol={total_vol_lots} lot_size={self.lot_size})")
             else:
                 pnl = 0
+                print(f"[Remote] PnL calc: no data, recording 0")
             if entry_price > 0:
                 self.total_pnl += pnl
                 self._write_trade("EXTERNAL_CLOSE", entry_price, exit_price, pnl, entries_used)
@@ -1277,6 +1295,7 @@ class GoldMCPRemoteBot:
             self.closed_half = False
             self.current_sl = 0.0
             self.extreme_price = 0.0
+            self.balance_at_position_open = 0.0  # reset for next trade
             self._save_state()
 
     async def sync_position_ids(self):
@@ -1440,6 +1459,7 @@ class GoldMCPRemoteBot:
                                  "tp_price": tp_price, "sl_price": sl_price,
                                  "extreme_price": price, "be_triggered": False})
             self.current_sl = sl_price
+            self.balance_at_position_open = self.current_balance  # snapshot for PnL calc
             self.last_entry_minute = datetime.now().minute
             print(f"[Remote] Entry done | vol={vol} pos_id={position_id} SL=${sl_price:.2f} TP=${tp_price:.2f}")
             await asyncio.sleep(2)
