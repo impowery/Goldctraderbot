@@ -77,32 +77,57 @@ def should_enter(close: list[float], high: list[float], low: list[float],
                  today_high: float = 0, today_low: float = 0,
                  m30_ema: float = 0, m30_ema_prev: float = 0,
                  rsi_oversold: float = 20, rsi_overbought: float = 80,
-                 stoch_oversold: float = 20, stoch_overbought: float = 80
+                 stoch_oversold: float = 20, stoch_overbought: float = 80,
+                 m30_ema_history: list = None
                  ) -> tuple:
-    """Returns (should_enter: bool, reason: str, rsi: float, stoch_k: float)."""
+    """Returns (should_enter: bool, reason: str, rsi: float, stoch_k: float).
+
+    Trend filter (bug #58, 2026-07-20): use 3-bar M30 EMA history instead of
+    single-bar comparison. A trend is "rising" only if last 3 EMA values are
+    non-decreasing (allows flat). Same for "falling". This prevents $0.01 noise
+    from triggering false trend reversals.
+    """
     if len(close) < 20:
         return False, "not enough data", 0.0, 0.0
 
     rsi = calc_rsi(close, 14)
     stoch_k, stoch_d = calc_stochastic(high, low, close, 14, 3)
 
-    # M30 EMA41 trend filter
-    m30_rising = m30_ema > m30_ema_prev if (m30_ema > 0 and m30_ema_prev > 0) else True
-    m30_falling = m30_ema < m30_ema_prev if (m30_ema > 0 and m30_ema_prev > 0) else True
+    # M30 EMA41 trend filter — 3-bar confirmation
+    # If we have history: check last 3 values are monotonic
+    # If no history (bot just started): allow trade (m30_ema == 0 means not initialized)
+    if m30_ema_history and len(m30_ema_history) >= 3:
+        last3 = m30_ema_history[-3:]
+        # All non-zero?
+        if all(v > 0 for v in last3):
+            m30_rising = last3[0] <= last3[1] <= last3[2]  # non-decreasing
+            m30_falling = last3[0] >= last3[1] >= last3[2]  # non-increasing
+            trend_str = "rising" if m30_rising else ("falling" if m30_falling else "mixed")
+        else:
+            m30_rising = m30_falling = True  # not enough real data
+            trend_str = "warming up"
+    elif m30_ema > 0 and m30_ema_prev > 0:
+        # Fallback to single-bar (old behavior) if no history available
+        m30_rising = m30_ema > m30_ema_prev
+        m30_falling = m30_ema < m30_ema_prev
+        trend_str = "single-bar fallback"
+    else:
+        m30_rising = m30_falling = True  # trend filter inactive
+        trend_str = "inactive"
 
     # LONG: RSI < oversold AND Stoch < oversold
     if rsi < rsi_oversold and stoch_k < stoch_oversold:
         if m30_rising or m30_ema == 0:
-            return True, f"LONG rsi={rsi:.1f} stoch={stoch_k:.1f}", rsi, stoch_k
+            return True, f"LONG rsi={rsi:.1f} stoch={stoch_k:.1f} trend={trend_str}", rsi, stoch_k
         else:
-            return False, f"LONG blocked (M30 falling) rsi={rsi:.1f} stoch={stoch_k:.1f}", rsi, stoch_k
+            return False, f"LONG blocked (M30 {trend_str}) rsi={rsi:.1f} stoch={stoch_k:.1f}", rsi, stoch_k
 
     # SHORT: RSI > overbought AND Stoch > overbought
     if rsi > rsi_overbought and stoch_k > stoch_overbought:
         if m30_falling or m30_ema == 0:
-            return True, f"SHORT rsi={rsi:.1f} stoch={stoch_k:.1f}", rsi, stoch_k
+            return True, f"SHORT rsi={rsi:.1f} stoch={stoch_k:.1f} trend={trend_str}", rsi, stoch_k
         else:
-            return False, f"SHORT blocked (M30 rising) rsi={rsi:.1f} stoch={stoch_k:.1f}", rsi, stoch_k
+            return False, f"SHORT blocked (M30 {trend_str}) rsi={rsi:.1f} stoch={stoch_k:.1f}", rsi, stoch_k
 
     return False, f"No signal rsi={rsi:.1f} stoch={stoch_k:.1f}", rsi, stoch_k
 

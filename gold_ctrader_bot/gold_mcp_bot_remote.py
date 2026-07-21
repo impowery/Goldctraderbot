@@ -232,6 +232,7 @@ class GoldMCPRemoteBot:
         self.m30_close_prices = []
         self.m30_ema = 0.0
         self.m30_ema_prev = 0.0  # previous M30 EMA value (to detect rising/falling)
+        self.m30_ema_history = []  # last 5 M30/M15 EMA values for 3-bar trend confirmation (bug #58)
         self.last_m30_fetch = 0
         # Daily open (from H1 candle) for daily trend filter
         self.today_open = 0.0
@@ -690,7 +691,8 @@ class GoldMCPRemoteBot:
             today_high=self.today_high, today_low=self.today_low,
             m30_ema=self.m30_ema, m30_ema_prev=self.m30_ema_prev,
             rsi_oversold=RSI_OVERSOLD, rsi_overbought=RSI_OVERBOUGHT,
-            stoch_oversold=STOCH_OVERSOLD, stoch_overbought=STOCH_OVERBOUGHT
+            stoch_oversold=STOCH_OVERSOLD, stoch_overbought=STOCH_OVERBOUGHT,
+            m30_ema_history=self.m30_ema_history
         )
         if not enter:
             if now % 60000 < CHECK_INTERVAL * 1000:
@@ -832,6 +834,10 @@ class GoldMCPRemoteBot:
         self.m30_ema_prev = self.m30_ema if self.m30_ema > 0 else new_ema
         self.m30_ema = new_ema
         self.m30_close_prices = closes
+        # Track history for 3-bar trend confirmation (bug #58)
+        if new_ema > 0:
+            self.m30_ema_history.append(new_ema)
+            self.m30_ema_history = self.m30_ema_history[-5:]  # keep last 5
         self.last_m30_fetch = int(time.time())
         trend = "rising" if self.m30_ema > self.m30_ema_prev else ("falling" if self.m30_ema < self.m30_ema_prev else "flat")
         print(f"[Remote] M30 EMA41=${self.m30_ema:.2f} (prev=${self.m30_ema_prev:.2f}, {trend})")
