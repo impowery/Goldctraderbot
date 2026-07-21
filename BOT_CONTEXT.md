@@ -525,3 +525,163 @@ systemctl restart gold-remote
 2. **GOLD бот — наш. BTC бот — НЕ ТРОГАТЬ.**
 3. **После ЛЮБЫХ правок — перезапустить сервис и проверить в логе**
 4. **Никогда не говорить "всё в порядке" без проверки реальных сделок**
+---
+
+## 18. История сделок и отчётов (добавлено 21 июля 2026)
+
+### 18.1 Как посмотреть историю сделок
+
+**На VPS — быстро через скрипт:**
+```bash
+# GOLD — сводка + последние 20 сделок
+python3 /root/bots/view_trades.py --bot gold
+
+# BTC — только сводка по дням
+python3 /root/bots/view_trades.py --bot btc --summary
+
+# GOLD — сделки за сегодня
+python3 /root/bots/view_trades.py --bot gold --today
+
+# BTC — сделки с 15 июля
+python3 /root/bots/view_trades.py --bot btc --since 2026-07-15
+
+# Экспорт GOLD в CSV (для Excel/Google Sheets)
+python3 /root/bots/view_trades.py --bot gold --csv /tmp/gold_trades.csv
+
+# Последние 50 сделок BTC
+python3 /root/bots/view_trades.py --bot btc -n 50
+```
+
+**Сырые JSONL файлы** (для анализа/парсинга):
+- `/root/bots/trades_gold_ctrader.jsonl` — все сделки GOLD (1 строка = 1 сделка JSON)
+- `/root/bots/trades_btc_ctrader.jsonl` — все сделки BTC
+- `/root/bots/trades_gold.jsonl` — старые сделки GOLD (paper bot)
+- `/root/bots/trades_btc.jsonl` — старые сделки BTC (paper bot)
+- `/root/bots/trades_hype.jsonl`, `trades_xyz100.jsonl`, `trades_wti.jsonl` — paper bots
+
+**Формат JSONL:**
+```json
+{
+  "ts": "2026-07-21T11:04:52Z",
+  "type": "SHORT",
+  "entry_price": 4061.94,
+  "exit_price": 4056.73,
+  "pnl": 378.91,
+  "reason": "TIME",
+  "entries": 1,
+  "version": "ctrader-backfill",
+  "position_id": 278020646,
+  "volume_lots": 0.7
+}
+```
+
+### 18.2 История отчётов (HTML dashboards)
+
+**На VPS:**
+- `/root/bots/reports/` — последние 7 дней HTML отчётов (каждые 5 мин, ~94 KB каждый)
+- `/root/bots/report_latest.html` — самый свежий отчёт (обновляется каждые 5 мин)
+- `/root/bots/reports_index.json` — индекс всех HTML на диске + архивов
+- `/root/bots/reports_archive/` — SHA256 checksums архивов (сами архивы загружены в GitHub)
+
+**В GitHub Releases (вся история навсегда):**
+https://github.com/impowery/Goldctraderbot/releases
+
+Теги: `reports-2026-W23`, `reports-2026-W24`, ..., `reports-2026-W29` (и далее автоматически каждую неделю)
+
+Структура архива: `<week_key>/<YYYY-MM-DD>/report_<YYYYMMDD>_<HHMMSS>.html`
+
+**Скачать конкретную неделю:**
+```bash
+wget https://github.com/impowery/Goldctraderbot/releases/download/reports-2026-W29/reports_2026-W29.tar.gz
+tar xzf reports_2026-W29.tar.gz
+# открой: 2026-W29/2026-07-15/report_20260715_120001.html
+```
+
+**Manifest со всеми URL'ами:** `/root/bots/reports_manifest.json`
+
+### 18.3 Автоматизация (cron)
+
+**Cron job (3:00 UTC ежедневно):**
+```
+0 3 * * * /root/bots/archive_and_upload.sh >> /root/bots/logs/archive_reports.log 2>&1
+```
+
+Скрипт `archive_and_upload.sh`:
+1. Архивирует HTML отчёты старше 7 дней в `reports_YYYY-Www.tar.gz` (gzip, -86%)
+2. Загружает архивы в GitHub Releases (бесконечное бесплатное хранилище)
+3. Удаляет локальные архивы после upload (оставляет SHA256 для верификации)
+4. Перестраивает `reports_index.json`
+
+### 18.4 Скрипты на VPS
+
+| Скрипт | Назначение |
+|---|---|
+| `/root/bots/gen_report.py` | Генерация HTML отчёта каждые 5 мин (cron) |
+| `/root/bots/dashboard_server.py` | HTTP сервер дашборда на порту 8080 |
+| `/root/bots/archive_reports.py` | Архивация старых отчётов в tar.gz |
+| `/root/bots/upload_reports_to_github.py` | Upload архивов в GitHub Releases |
+| `/root/bots/archive_and_upload.sh` | Wrapper для cron (archive + upload + index) |
+| `/root/bots/view_trades.py` | Просмотр истории сделок (сводка, фильтры, CSV export) |
+
+### 18.5 Доступ к дашборду
+
+**URL:** http://193.233.19.171:8080/
+
+**Что показывает:**
+- Live метрики всех ботов (баланс, equity, PnL)
+- Текущие позиции
+- Графики PnL за день/неделю
+- Обновление каждые 5 минут
+
+**Команды управления дашбордом:**
+```bash
+# Проверить что работает
+curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/  # должно быть 200
+
+# Перезапустить если завис
+ps -ef | grep dashboard_server | grep -v grep
+kill <PID>
+cd /root/bots && nohup python3 dashboard_server.py > /root/bots/dashboard.log 2>&1 &
+```
+
+### 18.6 Сохранять ли на ноутбук?
+
+**Нет, не обязательно.** Вся история уже в 3 местах:
+1. **VPS** — последние 7 дней HTML + все JSONL trade logs
+2. **GitHub Releases** — все HTML отчёты навсегда (по неделям)
+3. **GitHub repo** — текущий код ботов
+
+**Если нужно скачать на ноут:**
+```bash
+# Все сделки GOLD в CSV
+ssh root@193.233.19.171 'python3 /root/bots/view_trades.py --bot gold --csv /tmp/gold.csv'
+scp root@193.233.19.171:/tmp/gold.csv ~/Desktop/
+
+# Или весь trade log JSONL
+scp root@193.233.19.171:/root/bots/trades_gold_ctrader.jsonl ~/Desktop/
+
+# Скачать все архивы отчётов из GitHub (одной командой)
+for w in W23 W24 W25 W26 W27 W28 W29; do
+  wget https://github.com/impowery/Goldctraderbot/releases/download/reports-2026-$w/reports_2026-$w.tar.gz
+done
+```
+
+**Регулярный backup на ноут (опционально, раз в месяц):**
+```bash
+# Создать архив всех trade logs
+ssh root@193.233.19.171 'tar czf /tmp/all_trades.tar.gz /root/bots/trades_*.jsonl'
+scp root@193.233.19.171:/tmp/all_trades.tar.gz ~/Backups/trades_$(date +%Y%m%d).tar.gz
+```
+
+### 18.7 Сводка по местам хранения
+
+| Что | Где | Размер | Давность |
+|---|---|---|---|
+| HTML отчёты (свежие) | VPS `/root/bots/reports/` | ~180 MB | последние 7 дней |
+| HTML отчёты (архив) | GitHub Releases | ~120 MB | навсегда |
+| Trade logs JSONL | VPS `/root/bots/trades_*.jsonl` | ~500 KB total | навсегда |
+| State files | VPS bot dirs | ~1 KB каждый | текущее состояние |
+| Bot code | VPS + GitHub repos | ~200 KB | текущий + git history |
+| Manifest | VPS `/root/bots/reports_manifest.json` | 4 KB | обновляется автоматически |
+| Index | VPS `/root/bots/reports_index.json` | 428 KB | обновляется автоматически |
+
