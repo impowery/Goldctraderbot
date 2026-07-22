@@ -76,64 +76,82 @@ def calc_ema(prices: list[float], period: int) -> float:
 def should_enter(close: list[float], high: list[float], low: list[float],
                  today_high: float = 0, today_low: float = 0,
                  m30_ema: float = 0, m30_ema_prev: float = 0,
-                 rsi_oversold: float = 20, rsi_overbought: float = 80,
+                 rsi_oversold: float = 30, rsi_overbought: float = 70,
                  stoch_oversold: float = 20, stoch_overbought: float = 80,
                  m30_ema_history: list = None
                  ) -> tuple:
-    """Returns (should_enter: bool, reason: str, rsi: float, stoch_k: float).
+    """Trend-following with RSI as momentum confirmation (Variant 3, 2026-07-22).
 
-    Trend filter (bug #58, 2026-07-20): use 3-bar M30 EMA history instead of
-    single-bar comparison. A trend is "rising" only if last 3 EMA values are
-    non-decreasing (allows flat). Same for "falling". This prevents $0.01 noise
-    from triggering false trend reversals.
+    Entry LONG:  price > EMA41 AND 50 < RSI < 70 AND Stoch > 50
+    Entry SHORT: price < EMA41 AND 30 < RSI < 50 AND Stoch < 50
+
+    Protection from extremes:
+    - RSI >= 70 -> LONG blocked (overheated, reversal risk)
+    - RSI <= 30 -> SHORT blocked (oversold, bounce risk)
+
+    Exit (should_exit_rsi): RSI crosses 50 in reverse direction.
+
+    Args:
+        rsi_oversold: lower RSI bound (default 30) - below this = oversold, no SHORT
+        rsi_overbought: upper RSI bound (default 70) - above this = overbought, no LONG
+        stoch_*: legacy params, not used in entry logic (Stoch > 50 for LONG, < 50 for SHORT)
     """
     if len(close) < 20:
         return False, "not enough data", 0.0, 0.0
 
     rsi = calc_rsi(close, 14)
     stoch_k, stoch_d = calc_stochastic(high, low, close, 14, 3)
-
-    # Trend filter (bug #59, 2026-07-22, Variant 2): price vs M30/M15 EMA41
-    # If price > EMA41 → trend is UP → only LONG allowed
-    # If price < EMA41 → trend is DOWN → only SHORT allowed
-    # If EMA41 == 0 (warmup) → both allowed (filter inactive)
     price = close[-1]
+
+    # Trend filter (Variant 2): price vs EMA41
     if m30_ema > 0:
         if price > m30_ema:
-            long_allowed = True
-            short_allowed = False
+            trend_up = True
             trend_str = f"UP (price ${price:.2f} > EMA ${m30_ema:.2f})"
         else:
-            long_allowed = False
-            short_allowed = True
+            trend_up = False
             trend_str = f"DOWN (price ${price:.2f} < EMA ${m30_ema:.2f})"
     else:
-        long_allowed = short_allowed = True
+        trend_up = None  # warmup
         trend_str = "inactive (EMA warmup)"
 
-    # LONG: RSI < oversold AND Stoch < oversold AND price > EMA
-    if rsi < rsi_oversold and stoch_k < stoch_oversold:
-        if long_allowed:
+    # LONG: trend UP + RSI momentum 50-70 + Stoch > 50 (buyers in control)
+    # RSI >= 70 = overheated, skip (protection from peak entry)
+    if trend_up is True or trend_up is None:
+        if rsi >= rsi_overbought:
+            return False, f"LONG skip (RSI {rsi:.1f} >= {rsi_overbought} overheated) trend={trend_str} stoch={stoch_k:.1f}", rsi, stoch_k
+        if 50 < rsi < rsi_overbought and stoch_k > 50:
             return True, f"LONG rsi={rsi:.1f} stoch={stoch_k:.1f} trend={trend_str}", rsi, stoch_k
-        else:
-            return False, f"LONG blocked (trend {trend_str}) rsi={rsi:.1f} stoch={stoch_k:.1f}", rsi, stoch_k
+        if 50 < rsi < rsi_overbought and stoch_k <= 50:
+            return False, f"LONG blocked (Stoch {stoch_k:.1f} <= 50, no buyer momentum) rsi={rsi:.1f} trend={trend_str}", rsi, stoch_k
+        if rsi <= 50:
+            return False, f"No signal (RSI {rsi:.1f} <= 50, no momentum) stoch={stoch_k:.1f} trend={trend_str}", rsi, stoch_k
 
-    # SHORT: RSI > overbought AND Stoch > overbought AND price < EMA
-    if rsi > rsi_overbought and stoch_k > stoch_overbought:
-        if short_allowed:
+    # SHORT: trend DOWN + RSI momentum 30-50 + Stoch < 50 (sellers in control)
+    # RSI <= 30 = oversold, skip (protection from bottom entry)
+    if trend_up is False or trend_up is None:
+        if rsi <= rsi_oversold:
+            return False, f"SHORT skip (RSI {rsi:.1f} <= {rsi_oversold} oversold) trend={trend_str} stoch={stoch_k:.1f}", rsi, stoch_k
+        if rsi_oversold < rsi < 50 and stoch_k < 50:
             return True, f"SHORT rsi={rsi:.1f} stoch={stoch_k:.1f} trend={trend_str}", rsi, stoch_k
-        else:
-            return False, f"SHORT blocked (trend {trend_str}) rsi={rsi:.1f} stoch={stoch_k:.1f}", rsi, stoch_k
+        if rsi_oversold < rsi < 50 and stoch_k >= 50:
+            return False, f"SHORT blocked (Stoch {stoch_k:.1f} >= 50, no seller momentum) rsi={rsi:.1f} trend={trend_str}", rsi, stoch_k
+        if rsi >= 50:
+            return False, f"No signal (RSI {rsi:.1f} >= 50, no momentum) stoch={stoch_k:.1f} trend={trend_str}", rsi, stoch_k
 
-    return False, f"No signal rsi={rsi:.1f} stoch={stoch_k:.1f}", rsi, stoch_k
+    return False, f"No signal rsi={rsi:.1f} stoch={stoch_k:.1f} trend={trend_str}", rsi, stoch_k
 
 
 def should_exit_rsi(close: list[float], is_short: bool, rsi_exit: float = 50.0) -> bool:
-    """Check if RSI has crossed back to exit level."""
+    """Check if RSI has crossed back through 50 (momentum lost).
+
+    LONG exit:  RSI drops below 50 (buyers lost control)
+    SHORT exit: RSI rises above 50 (sellers lost control)
+    """
     if len(close) < 15:
         return False
     rsi = calc_rsi(close, 14)
     if is_short:
-        return rsi <= rsi_exit
-    else:
         return rsi >= rsi_exit
+    else:
+        return rsi <= rsi_exit
