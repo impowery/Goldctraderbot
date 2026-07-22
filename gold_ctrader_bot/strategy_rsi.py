@@ -93,41 +93,37 @@ def should_enter(close: list[float], high: list[float], low: list[float],
     rsi = calc_rsi(close, 14)
     stoch_k, stoch_d = calc_stochastic(high, low, close, 14, 3)
 
-    # M30 EMA41 trend filter — 3-bar confirmation
-    # If we have history: check last 3 values are monotonic
-    # If no history (bot just started): allow trade (m30_ema == 0 means not initialized)
-    if m30_ema_history and len(m30_ema_history) >= 3:
-        last3 = m30_ema_history[-3:]
-        # All non-zero?
-        if all(v > 0 for v in last3):
-            m30_rising = last3[0] <= last3[1] <= last3[2]  # non-decreasing
-            m30_falling = last3[0] >= last3[1] >= last3[2]  # non-increasing
-            trend_str = "rising" if m30_rising else ("falling" if m30_falling else "mixed")
+    # Trend filter (bug #59, 2026-07-22, Variant 2): price vs M30/M15 EMA41
+    # If price > EMA41 → trend is UP → only LONG allowed
+    # If price < EMA41 → trend is DOWN → only SHORT allowed
+    # If EMA41 == 0 (warmup) → both allowed (filter inactive)
+    price = close[-1]
+    if m30_ema > 0:
+        if price > m30_ema:
+            long_allowed = True
+            short_allowed = False
+            trend_str = f"UP (price ${price:.2f} > EMA ${m30_ema:.2f})"
         else:
-            m30_rising = m30_falling = True  # not enough real data
-            trend_str = "warming up"
-    elif m30_ema > 0 and m30_ema_prev > 0:
-        # Fallback to single-bar (old behavior) if no history available
-        m30_rising = m30_ema > m30_ema_prev
-        m30_falling = m30_ema < m30_ema_prev
-        trend_str = "single-bar fallback"
+            long_allowed = False
+            short_allowed = True
+            trend_str = f"DOWN (price ${price:.2f} < EMA ${m30_ema:.2f})"
     else:
-        m30_rising = m30_falling = True  # trend filter inactive
-        trend_str = "inactive"
+        long_allowed = short_allowed = True
+        trend_str = "inactive (EMA warmup)"
 
-    # LONG: RSI < oversold AND Stoch < oversold
+    # LONG: RSI < oversold AND Stoch < oversold AND price > EMA
     if rsi < rsi_oversold and stoch_k < stoch_oversold:
-        if m30_rising or m30_ema == 0:
+        if long_allowed:
             return True, f"LONG rsi={rsi:.1f} stoch={stoch_k:.1f} trend={trend_str}", rsi, stoch_k
         else:
-            return False, f"LONG blocked (M30 {trend_str}) rsi={rsi:.1f} stoch={stoch_k:.1f}", rsi, stoch_k
+            return False, f"LONG blocked (trend {trend_str}) rsi={rsi:.1f} stoch={stoch_k:.1f}", rsi, stoch_k
 
-    # SHORT: RSI > overbought AND Stoch > overbought
+    # SHORT: RSI > overbought AND Stoch > overbought AND price < EMA
     if rsi > rsi_overbought and stoch_k > stoch_overbought:
-        if m30_falling or m30_ema == 0:
+        if short_allowed:
             return True, f"SHORT rsi={rsi:.1f} stoch={stoch_k:.1f} trend={trend_str}", rsi, stoch_k
         else:
-            return False, f"SHORT blocked (M30 {trend_str}) rsi={rsi:.1f} stoch={stoch_k:.1f}", rsi, stoch_k
+            return False, f"SHORT blocked (trend {trend_str}) rsi={rsi:.1f} stoch={stoch_k:.1f}", rsi, stoch_k
 
     return False, f"No signal rsi={rsi:.1f} stoch={stoch_k:.1f}", rsi, stoch_k
 
