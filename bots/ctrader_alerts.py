@@ -99,6 +99,31 @@ def _fmt_price(p: float) -> str:
     return f"${s}"
 
 
+# Voice trades log — records position IDs opened/closed by voice bot
+VOICE_TRADES_LOG = "/root/bots/voice_trades.jsonl"
+
+
+def get_voice_position_ids():
+    """Return set of position_ids that were opened or closed by voice bot.
+    Returns dict: {position_id: 'voice'} for quick lookup.
+    """
+    voice_pids = {}
+    try:
+        with open(VOICE_TRADES_LOG) as f:
+            for line in f:
+                try:
+                    import json
+                    entry = json.loads(line)
+                    pid = entry.get("position_id")
+                    if pid:
+                        voice_pids[pid] = entry
+                except (json.JSONDecodeError, KeyError):
+                    continue
+    except FileNotFoundError:
+        pass
+    return voice_pids
+
+
 def load_trades(path: str) -> list:
     """Load trades from a single file."""
     p = Path(path)
@@ -183,10 +208,18 @@ def fmt_trade_alert(trade: dict, trade_num: int, total_pnl: float = None) -> str
     # Handle OPEN positions differently from CLOSED trades
     # (backfill_trades.py logs open positions with reason=OPEN and entry=exit price)
     is_open = reason.upper() in ("OPEN", "OPENED", "EXT_OPEN")
+    # Check if this trade was made by voice bot
+    position_id = trade.get("position_id")
+    voice_pids = get_voice_position_ids()
+    is_voice = position_id in voice_pids
+    source_str = "🎙️ voice" if is_voice else "🤖 auto"
+
     if is_open:
-        header = f"<b>🆕 {bot_name} · Trade #{trade_num} OPENED</b>"
+        emoji = "🎙️" if is_voice else "🆕"
+        header = f"<b>{emoji} {bot_name} · Trade #{trade_num} OPENED ({source_str})</b>"
         body = (
             f"<pre>Direction   {dir_arrow} {dir_word}\n"
+            f"Source      {source_str}\n"
             f"Entries     {entries} / {max_entries}\n"
             f"Entry       {entry_str}\n"
             f"SL/TP       set by bot\n"
@@ -196,9 +229,10 @@ def fmt_trade_alert(trade: dict, trade_num: int, total_pnl: float = None) -> str
         # Don't show PnL for open positions (it's just floating)
         return msg
 
-    header = f"<b>{pnl_emoji} {bot_name} · Trade #{trade_num} closed</b>"
+    header = f"<b>{pnl_emoji} {bot_name} · Trade #{trade_num} closed ({source_str})</b>"
     body = (
         f"<pre>Direction   {dir_arrow} {dir_word}\n"
+        f"Source      {source_str}\n"
         f"Reason      {reason}\n"
         f"Entries     {entries} / {max_entries}\n"
         f"Entry       {entry_str}\n"

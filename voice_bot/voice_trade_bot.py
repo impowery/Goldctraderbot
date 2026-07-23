@@ -425,6 +425,51 @@ async def download_telegram_file(file_id, bot_token=TELEGRAM_BOT_TOKEN):
 VOICE_PAUSE_FLAG = "/root/bots/voice_pause.flag"
 VOICE_PAUSE_DURATION = 300  # 5 minutes — auto-bot stays paused this long after voice command
 
+# Voice trades marker log — records position IDs opened/closed by voice bot
+# ctrader_alerts.py reads this to show "voice" vs "auto" source in alerts
+VOICE_TRADES_LOG = "/root/bots/voice_trades.jsonl"
+
+
+def log_voice_trade(position_id, action, side, price, command):
+    """Append a marker entry to voice_trades.jsonl.
+    action: 'opened' | 'closed'
+    side: 'LONG' | 'SHORT' | 'FLAT'
+    command: original voice command ('купи', 'продай', 'закрой')
+    """
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "position_id": position_id,
+        "action": action,
+        "side": side,
+        "price": price,
+        "command": command,
+        "source": "voice"
+    }
+    try:
+        with open(VOICE_TRADES_LOG, "a") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        log.info(f"Voice trade logged: {action} {side} PID={position_id}")
+    except Exception as e:
+        log.warning(f"Failed to log voice trade: {e}")
+
+
+def is_voice_position(position_id):
+    """Check if a position was opened by voice bot (by position_id)."""
+    if not position_id or not os.path.exists(VOICE_TRADES_LOG):
+        return False
+    try:
+        with open(VOICE_TRADES_LOG) as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                    if entry.get("position_id") == position_id and entry.get("action") == "opened":
+                        return True
+                except json.JSONDecodeError:
+                    continue
+    except Exception:
+        pass
+    return False
+
 
 def set_voice_pause(duration_sec=VOICE_PAUSE_DURATION):
     """Create pause flag file. Auto-bot will see this and stay idle."""
@@ -471,6 +516,12 @@ async def execute_command(command, ctrader):
             return True, "ℹ️ Нет открытых позиций для закрытия."
         # Pause auto-bot before closing (give us 5 min to manage position)
         set_voice_pause(300)
+        # Log voice trade markers for each position being closed
+        for p in positions:
+            pid = p.get("positionId")
+            side = "LONG" if p.get("tradeSide", "").upper() == "BUY" else "SHORT"
+            entry = float(p.get("entryPrice", 0))
+            log_voice_trade(pid, "closed", side, entry, "закрой")
         results, _ = await ctrader.close_all()
         return True, f"✅ Закрыто позиций: {len(results)}\n⏸️ Auto-bot на паузе 5 мин"
 
@@ -479,6 +530,11 @@ async def execute_command(command, ctrader):
         set_voice_pause(300)
         if has_short:
             # Close SHORT first
+            for p in positions:
+                if p.get("tradeSide", "").upper() == "SELL":
+                    pid = p.get("positionId")
+                    entry = float(p.get("entryPrice", 0))
+                    log_voice_trade(pid, "closed", "SHORT", entry, "купи")
             results, _ = await ctrader.close_all()
             return True, f"✅ SHORT закрыт по команде 'купи' (закрыто: {len(results)})\n⏸️ Auto-bot на паузе 5 мин"
         if has_long:
@@ -493,6 +549,7 @@ async def execute_command(command, ctrader):
         order = await ctrader.create_market_order("BUY", DEFAULT_VOLUME, sl_price, tp_price)
         if order and "positionId" in order:
             pid = order["positionId"]
+            log_voice_trade(pid, "opened", "LONG", entry, "купи")
             return True, (f"✅ Открыт LONG {DEFAULT_VOLUME} lot @ ${entry:.2f}\n"
                           f"SL=${sl_price:.2f} (-${SL_USD})\n"
                           f"TP=${tp_price:.2f} (+${TP_USD})\n"
@@ -504,6 +561,11 @@ async def execute_command(command, ctrader):
         set_voice_pause(300)
         if has_long:
             # Close LONG first
+            for p in positions:
+                if p.get("tradeSide", "").upper() == "BUY":
+                    pid = p.get("positionId")
+                    entry = float(p.get("entryPrice", 0))
+                    log_voice_trade(pid, "closed", "LONG", entry, "продай")
             results, _ = await ctrader.close_all()
             return True, f"✅ LONG закрыт по команде 'продай' (закрыто: {len(results)})\n⏸️ Auto-bot на паузе 5 мин"
         if has_short:
@@ -518,6 +580,7 @@ async def execute_command(command, ctrader):
         order = await ctrader.create_market_order("SELL", DEFAULT_VOLUME, sl_price, tp_price)
         if order and "positionId" in order:
             pid = order["positionId"]
+            log_voice_trade(pid, "opened", "SHORT", entry, "продай")
             return True, (f"✅ Открыт SHORT {DEFAULT_VOLUME} lot @ ${entry:.2f}\n"
                           f"SL=${sl_price:.2f} (+${SL_USD})\n"
                           f"TP=${tp_price:.2f} (-${TP_USD})\n"
