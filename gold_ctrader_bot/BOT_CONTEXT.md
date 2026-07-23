@@ -744,3 +744,90 @@ wget https://github.com/impowery/Goldctraderbot/releases/download/trades-2026-07
 tar xzf trades_2026-07.tar.gz
 cp trades_gold_ctrader.jsonl /root/bots/
 ```
+
+
+---
+
+## 19. Voice Trade Bot (добавлено 23 июля 2026)
+
+### 19.1 Что это
+Голосовой Telegram бот для **ручного** управления GOLD позицией:
+- Шлёшь голосовое сообщение → бот распознаёт речь (локальный Whisper) → исполняет команду на cTrader
+- Полностью бесплатный (нет API calls, всё локально на VPS)
+
+### 19.2 Команды (RU/EN)
+
+| Голос/текст | Действие |
+|---|---|
+| "купи" / "buy" / "long" | Если SHORT → закрыть. Если flat → открыть LONG |
+| "продай" / "sell" / "short" | Если LONG → закрыть. Если flat → открыть SHORT |
+| "закрой" / "close" / "flat" | Закрыть любую позицию |
+| "статус" / "status" | Показать текущую позицию и баланс |
+
+Параметры позиции (из GOLD .env):
+- Volume: 0.7 lot
+- SL: $25 от входа
+- TP: $35 от входа
+
+### 19.3 Архитектура
+
+```
+[Telegram Voice Message]
+    ↓
+[Telegram Bot API] (getUpdates polling)
+    ↓
+[Download .ogg file]
+    ↓
+[faster-whisper local STT] (small model, 244 MB, CPU int8)
+    ↓
+[Command parser] — RU/EN keywords
+    ↓
+[cTrader Remote MCP API] — open/close position
+    ↓
+[Telegram reply] — результат исполнения
+```
+
+### 19.4 Файлы
+
+| Файл | Назначение |
+|---|---|
+| `/root/bots/voice_trade_bot.py` | Главный скрипт бота |
+| `/root/voice_bot_venv/` | Python venv с faster-whisper, pyTelegramBotAPI, httpx |
+| `/etc/systemd/system/voice-trade-bot.service` | systemd unit (auto-restart) |
+| `/root/bots/logs/voice_trade.log` | Лог работы бота |
+
+### 19.5 Управление
+
+```bash
+# Статус
+systemctl status voice-trade-bot.service
+
+# Перезапуск
+systemctl restart voice-trade-bot.service
+
+# Лог в реальном времени
+tail -f /root/bots/logs/voice_trade.log
+
+# Остановить
+systemctl stop voice-trade-bot.service
+```
+
+### 19.6 Безопасность
+
+- Только chat_id 354703083 может слать команды (в `AUTHORIZED_CHAT_IDS`)
+- Whisper модель локальная (нет данных наружу)
+- Все команды логируются
+- Token cTrader в .env (не в коде)
+- Если уже LONG и сказано "купи" — команда игнорируется (не дублируется)
+
+### 19.7 Производительность
+
+- Whisper small model: ~244 MB RAM, 2-3 сек на 5-сек голосовое
+- CPU only (Intel Xeon Gold 6152)
+- Memory limit: 2 GB (systemd MemoryMax)
+
+### 19.8 Что НЕ делает
+
+- Не отменяет лимит 3 сделки/день автобота (голосовые команды — отдельные сделки)
+- Не управляет риском автоматически (SL/TP фиксированные из .env)
+- Не работает с BTC (только GOLD). Для BTC нужно расширить
