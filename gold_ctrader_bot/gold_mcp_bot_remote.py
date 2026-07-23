@@ -62,6 +62,25 @@ STOCH_OVERSOLD = float(os.getenv("STOCH_OVERSOLD", "20"))
 STOCH_OVERBOUGHT = float(os.getenv("STOCH_OVERBOUGHT", "80"))
 RSI_EXIT = float(os.getenv("RSI_EXIT", "50"))
 MAX_DAILY_TRADES = int(os.getenv("MAX_DAILY_TRADES", "3"))
+
+# Voice bot pause flag — when exists, auto-bot does NOT trade (let voice bot handle)
+VOICE_PAUSE_FLAG = "/root/bots/voice_pause.flag"
+
+def is_voice_paused():
+    """Check if voice bot has requested pause. Returns (paused: bool, expires_in: int seconds)."""
+    if not os.path.exists(VOICE_PAUSE_FLAG):
+        return False, 0
+    try:
+        with open(VOICE_PAUSE_FLAG) as f:
+            expiry = int(f.read().strip())
+        now = int(time.time())
+        if now >= expiry:
+            # Expired — remove stale flag
+            os.remove(VOICE_PAUSE_FLAG)
+            return False, 0
+        return True, expiry - now
+    except (ValueError, IOError):
+        return False, 0
 SYMBOL = os.getenv("SYMBOL_NAME", "XAUUSD")
 MIN_INTERVAL_MINUTES = int(os.getenv("MIN_INTERVAL_MINUTES", "60"))
 MAX_DAILY_LOSS_PERCENT = float(os.getenv("MAX_LOSS_PERCENT", "3.0"))
@@ -525,6 +544,22 @@ class GoldMCPRemoteBot:
 
     async def tick(self):
         now = int(time.time() * 1000)
+
+        # 0. Voice bot pause check — if voice bot wants to trade manually, do NOT open/close positions
+        voice_paused, expires_in = is_voice_paused()
+        if voice_paused:
+            # Log every ~1 min so we don't spam log
+            if now % 60000 < CHECK_INTERVAL * 1000:
+                print(f"[Remote] VOICE PAUSE active — auto-bot idle ({expires_in}s remaining)")
+            # Still fetch candles to keep RSI/Stoch fresh, but do NOT call strategy/manage
+            if now - self.last_candle_fetch > 60000:
+                await self.fetch_candles()
+                self.last_candle_fetch = now
+            # Still sync positions to detect voice bot's external closes
+            if not DRY_RUN:
+                await self.sync_position()
+            self._save_state()
+            return
 
         # 1. Balance
         bal = await self.get_balance_raw()

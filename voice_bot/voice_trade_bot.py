@@ -306,6 +306,29 @@ async def download_telegram_file(file_id, bot_token=TELEGRAM_BOT_TOKEN):
         return tmp.name
 
 
+# Voice bot pause flag — auto-bot checks this and stays idle during manual trade
+VOICE_PAUSE_FLAG = "/root/bots/voice_pause.flag"
+VOICE_PAUSE_DURATION = 300  # 5 minutes — auto-bot stays paused this long after voice command
+
+
+def set_voice_pause(duration_sec=VOICE_PAUSE_DURATION):
+    """Create pause flag file. Auto-bot will see this and stay idle."""
+    expiry = int(time.time()) + duration_sec
+    with open(VOICE_PAUSE_FLAG, "w") as f:
+        f.write(str(expiry))
+    log.info(f"Voice pause set for {duration_sec}s (auto-bot idle)")
+
+
+def clear_voice_pause():
+    """Remove pause flag — auto-bot resumes normal operation."""
+    try:
+        if os.path.exists(VOICE_PAUSE_FLAG):
+            os.remove(VOICE_PAUSE_FLAG)
+            log.info("Voice pause cleared (auto-bot resumed)")
+    except Exception as e:
+        log.warning(f"Failed to clear pause flag: {e}")
+
+
 # === Trade executor ===
 async def execute_command(command, ctrader):
     """Execute trade command. Returns (success, message)."""
@@ -331,16 +354,20 @@ async def execute_command(command, ctrader):
     if command == "close":
         if pos_count == 0:
             return True, "ℹ️ Нет открытых позиций для закрытия."
+        # Pause auto-bot before closing (give us 5 min to manage position)
+        set_voice_pause(300)
         results, _ = await ctrader.close_all()
-        return True, f"✅ Закрыто позиций: {len(results)}"
+        return True, f"✅ Закрыто позиций: {len(results)}\n⏸️ Auto-bot на паузе 5 мин"
 
     if command == "buy":
+        # Always pause auto-bot for 5 min when user gives manual command
+        set_voice_pause(300)
         if has_short:
             # Close SHORT first
             results, _ = await ctrader.close_all()
-            return True, f"✅ SHORT закрыт по команде 'купи' (закрыто: {len(results)})"
+            return True, f"✅ SHORT закрыт по команде 'купи' (закрыто: {len(results)})\n⏸️ Auto-bot на паузе 5 мин"
         if has_long:
-            return True, "ℹ️ Уже в LONG позиции. Голосовая команда проигнорирована."
+            return True, "ℹ️ Уже в LONG позиции. Голосовая команда проигнорирована.\n⏸️ Auto-bot на паузе 5 мин"
         # Open LONG
         bid, ask = await ctrader.get_spot_price()
         if ask == 0:
@@ -358,12 +385,14 @@ async def execute_command(command, ctrader):
         return False, f"❌ Ошибка открытия LONG: {order}"
 
     if command == "sell":
+        # Always pause auto-bot for 5 min when user gives manual command
+        set_voice_pause(300)
         if has_long:
             # Close LONG first
             results, _ = await ctrader.close_all()
-            return True, f"✅ LONG закрыт по команде 'продай' (закрыто: {len(results)})"
+            return True, f"✅ LONG закрыт по команде 'продай' (закрыто: {len(results)})\n⏸️ Auto-bot на паузе 5 мин"
         if has_short:
-            return True, "ℹ️ Уже в SHORT позиции. Голосовая команда проигнорирована."
+            return True, "ℹ️ Уже в SHORT позиции. Голосовая команда проигнорирована.\n⏸️ Auto-bot на паузе 5 мин"
         # Open SHORT
         bid, ask = await ctrader.get_spot_price()
         if bid == 0:
