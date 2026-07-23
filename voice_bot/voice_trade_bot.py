@@ -165,21 +165,34 @@ class CTraderMCP:
         return []
 
     async def get_balance(self):
-        """Get account balance."""
+        """Get account balance in USD. cTrader returns cents + moneyDigits."""
         data = await self.call("get_balance")
-        if data:
-            return float(data.get("balance", 0)) / 100.0
-        return 0.0
+        if not data or isinstance(data, str):
+            return 0.0
+        # balance is in cents; moneyDigits tells us decimal precision
+        money_digits = int(data.get("moneyDigits", 2))
+        bal_cents = int(data.get("balance", 0))
+        return bal_cents / (10 ** money_digits)
 
     async def get_spot_price(self):
-        """Get current spot price."""
-        data = await self.call("get_spot_price", {"symbolId": SYMBOL_ID})
-        if data:
-            # Bid/Ask in pipettes
-            bid = float(data.get("bid", 0)) / (10 ** PIP_DIGITS)
-            ask = float(data.get("ask", 0)) / (10 ** PIP_DIGITS)
-            return bid, ask
-        return 0, 0
+        """Get current bid/ask for our symbol.
+
+        cTrader MCP tool is 'get_spot_prices' (plural), symbolId must be a list.
+        Returns dict with 'bid' and 'ask' in display price, or (0, 0) on failure.
+        """
+        data = await self.call("get_spot_prices", {"symbolId": [SYMBOL_ID]})
+        if not data or isinstance(data, str):
+            log.error(f"get_spot_prices failed: {data}")
+            return 0, 0
+        prices = data.get("prices", []) or data.get("spotPrices", [])
+        if not prices:
+            log.error(f"get_spot_prices: no prices in response: {data}")
+            return 0, 0
+        p = prices[0]
+        # Bid/ask are in pipettes (price * 10^pip_digits)
+        bid = float(p.get("bid", 0)) / (10 ** PIP_DIGITS)
+        ask = float(p.get("ask", 0)) / (10 ** PIP_DIGITS)
+        return bid, ask
 
     async def close_position(self, position_id, volume_cents):
         """Close a position."""
