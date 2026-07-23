@@ -251,41 +251,143 @@ def get_whisper_model():
 
 
 def transcribe(audio_path):
-    """Transcribe audio file. Returns text (lowercased)."""
+    """Transcribe audio file. Returns text (lowercased).
+
+    Force language=ru (prevents 'kupi' being misdetected as Hindi 'कुपी').
+    Use initial_prompt with command words to bias recognition.
+    """
     model = get_whisper_model()
-    segments, info = model.transcribe(audio_path, language=None, beam_size=5)
+    # Force Russian + initial prompt with command words for better accuracy
+    segments, info = model.transcribe(
+        audio_path,
+        language="ru",          # force Russian (we accept English via fuzzy match later)
+        beam_size=5,
+        initial_prompt="Команды: купи, продай, закрой, статус. купи продай закрой статус."
+    )
     text = " ".join([s.text for s in segments]).strip().lower()
     return text
 
 
 # === Command parser ===
+# Transliteration map: latin -> cyrillic (for Whisper misrecognitions like 'coupi' -> 'купи')
+LATIN_TO_CYR = {
+    "a": "а", "b": "б", "c": "к", "d": "д", "e": "е", "f": "ф", "g": "г",
+    "h": "х", "i": "и", "j": "й", "k": "к", "l": "л", "m": "м", "n": "н",
+    "o": "о", "p": "п", "q": "к", "r": "р", "s": "с", "t": "т", "u": "у",
+    "v": "в", "w": "в", "x": "кс", "y": "и", "z": "з",
+}
+
+
+def _translit_to_cyr(word):
+    """Transliterate latin chars to cyrillic. Keeps cyrillic as-is."""
+    out = ""
+    for ch in word.lower():
+        if ch in LATIN_TO_CYR:
+            out += LATIN_TO_CYR[ch]
+        else:
+            out += ch
+    return out
+
+
+# Levenshtein distance for fuzzy matching (handles 'купь' -> 'купи')
+def _levenshtein(a, b):
+    """Compute Levenshtein distance between two strings."""
+    if len(a) < len(b):
+        a, b = b, a
+    if len(b) == 0:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a):
+        curr = [i + 1]
+        for j, cb in enumerate(b):
+            ins = prev[j + 1] + 1
+            dele = curr[j] + 1
+            sub = prev[j] + (ca != cb)
+            curr.append(min(ins, dele, sub))
+        prev = curr
+    return prev[-1]
+
+
+def _fuzzy_match(word, target, max_dist=2):
+    """Check if word matches target within Levenshtein distance max_dist.
+    Special handling: also matches if word starts with target (e.g. 'купить' starts with 'купи').
+    Tries both original word AND transliterated version.
+    """
+    if word == target:
+        return True
+    if word.startswith(target) or target.startswith(word):
+        return True
+    # Try transliterated version (handles 'coupi' -> 'купи')
+    word_cyr = _translit_to_cyr(word)
+    if word_cyr == target or word_cyr.startswith(target) or target.startswith(word_cyr):
+        return True
+    # Levenshtein on both versions
+    for w in [word, word_cyr]:
+        dist = _levenshtein(w, target)
+        max_allowed = 1 if len(target) <= 4 else 2
+        if dist <= max_allowed:
+            return True
+    return False
+
+
 def parse_command(text):
     """Parse transcribed text to trade command.
+
+    Handles Whisper misrecognitions:
+    - 'купи' may come as 'coupi', 'copi', 'kupi', 'kupy', 'куми', 'куби'
+    - 'продай' may come as 'prodai', 'proday', 'прадай'
+    - 'закрой' may come as 'zakroy', 'close'
+    Uses fuzzy matching (Levenshtein distance <= 2) + transliteration.
 
     Returns: (command, note) where command is one of:
     'buy', 'sell', 'close', 'status', 'unknown'
     """
     text = text.lower().strip()
-    # Remove punctuation
-    for ch in ".,!?;:":
-        text = text.replace(ch, " ")
-    words = text.split()
+    # Remove punctuation and non-letter chars (keep cyrillic + latin)
+    cleaned = ""
+    for ch in text:
+        if ch.isalpha() or ch.isspace():
+            cleaned += ch
+        else:
+            cleaned += " "
+    words = cleaned.split()
 
-    # Buy/Long (RU/EN)
-    buy_words = {"купи", "купить", "покупай", "покупка", "лонг", "long", "buy", "bullish", "вверх"}
-    sell_words = {"продай", "продать", "продавай", "продажа", "шорт", "short", "sell", "bearish", "вниз"}
-    close_words = {"закрой", "закрыть", "close", "flat", "закрыться", "выйди", "exit"}
-    status_words = {"статус", "status", "позиция", "position", "что", "позицию"}
+    # Target words (Russian + English + common misrecognitions)
+    buy_targets = ["купи", "купить", "покупай", "лонг", "long", "buy", "bay", "bye", "куми", "куби", "куш"]
+    sell_targets = ["продай", "продать", "продавай", "шорт", "short", "sell", "cel", "cell", "прадай", "прадать"]
+    close_targets = ["закрой", "закрыть", "close", "flat", "клоз", "клоуз", "заркрой"]
+    status_targets = ["статус", "status", "позиция", "position"]
+
+    log.info(f"Parse: words={words} (translit: {[_translit_to_cyr(w) for w in words]})")
 
     for w in words:
-        if w in buy_words:
-            return "buy", f"распознано: '{w}'"
-        if w in sell_words:
-            return "sell", f"распознано: '{w}'"
-        if w in close_words:
-            return "close", f"распознано: '{w}'"
-        if w in status_words:
-            return "status", f"распознано: '{w}'"
+        # Exact match first (also try transliterated)
+        w_cyr = _translit_to_cyr(w)
+        for variant in [w, w_cyr]:
+            if variant in buy_targets:
+                return "buy", f"распознано: '{w}' (exact{' translit' if variant != w else ''})"
+            if variant in sell_targets:
+                return "sell", f"распознано: '{w}' (exact{' translit' if variant != w else ''})"
+            if variant in close_targets:
+                return "close", f"распознано: '{w}' (exact{' translit' if variant != w else ''})"
+            if variant in status_targets:
+                return "status", f"распознано: '{w}' (exact{' translit' if variant != w else ''})"
+
+    # Fuzzy match if no exact
+    for w in words:
+        for target in buy_targets:
+            if _fuzzy_match(w, target):
+                return "buy", f"распознано: '{w}' ~ '{target}' (fuzzy)"
+        for target in sell_targets:
+            if _fuzzy_match(w, target):
+                return "sell", f"распознано: '{w}' ~ '{target}' (fuzzy)"
+        for target in close_targets:
+            if _fuzzy_match(w, target):
+                return "close", f"распознано: '{w}' ~ '{target}' (fuzzy)"
+        for target in status_targets:
+            if _fuzzy_match(w, target):
+                return "status", f"распознано: '{w}' ~ '{target}' (fuzzy)"
+
     return "unknown", f"не распознано: '{text}'"
 
 
