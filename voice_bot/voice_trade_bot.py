@@ -157,9 +157,20 @@ class CTraderMCP:
                             return content[0].get("text")
         return None
 
-    async def get_positions(self):
-        """Get open XAUUSD positions."""
+    async def get_positions(self, _retry=True):
+        """Get open XAUUSD positions. Reconnects once on failure."""
         data = await self.call("get_positions", {"symbolId": SYMBOL_ID})
+        if data is None and _retry:
+            log.warning("get_positions returned None — reconnecting...")
+            try:
+                await self.client.aclose()
+            except Exception:
+                pass
+            self.client = httpx.AsyncClient(timeout=60)
+            self.session_id = None
+            self.tool_names = {}
+            if await self.connect():
+                return await self.get_positions(_retry=False)
         if data and "positions" in data:
             return data["positions"]
         return []
@@ -174,15 +185,29 @@ class CTraderMCP:
         bal_cents = int(data.get("balance", 0))
         return bal_cents / (10 ** money_digits)
 
-    async def get_spot_price(self):
+    async def get_spot_price(self, _retry=True):
         """Get current bid/ask for our symbol.
 
         cTrader MCP tool is 'get_spot_prices' (plural), symbolId must be a list.
         Returns dict with 'bid' and 'ask' in display price, or (0, 0) on failure.
+        On failure, tries to reconnect once and retry (handles expired sessions).
         """
         data = await self.call("get_spot_prices", {"symbolId": [SYMBOL_ID]})
         if not data or isinstance(data, str):
-            log.error(f"get_spot_prices failed: {data}")
+            log.warning(f"get_spot_prices failed: {data!r}")
+            if _retry:
+                log.info("Attempting MCP reconnect and retry...")
+                # Close old client and create new one
+                try:
+                    await self.client.aclose()
+                except Exception:
+                    pass
+                self.client = httpx.AsyncClient(timeout=60)
+                self.session_id = None
+                self.tool_names = {}
+                if await self.connect():
+                    return await self.get_spot_price(_retry=False)
+            log.error("get_spot_prices failed after retry")
             return 0, 0
         prices = data.get("prices", []) or data.get("spotPrices", [])
         if not prices:
