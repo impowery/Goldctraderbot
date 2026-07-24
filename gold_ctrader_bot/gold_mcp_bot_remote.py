@@ -81,6 +81,43 @@ def is_voice_paused():
         return True, expiry - now
     except (ValueError, IOError):
         return False, 0
+
+
+# Voice trades log — records position IDs opened by voice bot
+VOICE_TRADES_LOG = "/root/bots/voice_trades.jsonl"
+
+
+def get_voice_position_ids():
+    """Return set of position_ids that were opened by voice bot."""
+    pids = set()
+    if not os.path.exists(VOICE_TRADES_LOG):
+        return pids
+    try:
+        with open(VOICE_TRADES_LOG) as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                    if entry.get("action") == "opened":
+                        pids.add(entry.get("position_id"))
+                except (json.JSONDecodeError, KeyError):
+                    continue
+    except Exception:
+        pass
+    return pids
+
+
+def has_voice_position(entries):
+    """Check if any of our open entries was opened by voice bot."""
+    if not entries:
+        return False
+    voice_pids = get_voice_position_ids()
+    if not voice_pids:
+        return False
+    for entry in entries:
+        pid = entry.get("position_id")
+        if pid in voice_pids:
+            return True
+    return False
 SYMBOL = os.getenv("SYMBOL_NAME", "XAUUSD")
 MIN_INTERVAL_MINUTES = int(os.getenv("MIN_INTERVAL_MINUTES", "60"))
 MAX_DAILY_LOSS_PERCENT = float(os.getenv("MAX_LOSS_PERCENT", "3.0"))
@@ -1523,7 +1560,21 @@ class GoldMCPRemoteBot:
         if not all(e.get("position_id") for e in self.entries) and not DRY_RUN:
             await self.sync_position_ids()
 
-        # RSI EXIT — close when RSI crosses back to 50
+        # Check if any open position was opened by voice bot
+        # Voice positions are managed ONLY by user (via voice commands) or broker SL/TP.
+        # Auto-bot must NOT apply RSI_EXIT to them.
+        is_voice_managed = has_voice_position(self.entries)
+        if is_voice_managed:
+            voice_pids = get_voice_position_ids()
+            voice_pids_in_pos = [e.get("position_id") for e in self.entries if e.get("position_id") in voice_pids]
+            # Log every ~1 min so we know we're respecting voice
+            now_ms = int(time.time() * 1000)
+            if now_ms % 60000 < CHECK_INTERVAL * 1000:
+                print(f"[Remote] Voice position active ({voice_pids_in_pos}) — auto-bot respects, no RSI exit")
+            # Skip RSI_EXIT, just sync to detect external closes (broker SL/TP or voice bot close)
+            return
+
+        # RSI EXIT — close when RSI crosses back to 50 (auto-bot positions only)
         if len(self.close_prices) >= 15:
             if should_exit_rsi(self.close_prices, self.is_short, RSI_EXIT):
                 rsi = calc_rsi(self.close_prices, 14)
